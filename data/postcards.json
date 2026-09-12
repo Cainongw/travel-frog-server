@@ -1,0 +1,17 @@
+[
+  {
+    "id": 1,
+    "pic_id": 100,
+    "layers": [
+      { "layer": [1, 0, 0] },
+      { "layer": [2, 0, 0] },
+      { "layer": [5, 0, 0] },
+      { "layer": [6, 0, 0] },
+      { "layer": [8, 0, 0] },
+      { "layer": [7, 0, 0] },
+      { "layer": [11, 0, 0] }
+    ],
+    "for_ads": false,
+    "visit": false
+  }
+]

@@ -1,0 +1,9 @@
+# Reverse-engineering outputs derived from the game client.
+/Picture.json
+/resources.json
+/config.eab.json
+/decode_eab.js
+
+# Local overrides and logs.
+/data/*.local.json
+*.log
