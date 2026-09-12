@@ -3,7 +3,9 @@
 const net = require('net');
 const crypto = require('crypto');
 
-const socket = net.connect(8080, '127.0.0.1');
+const port = Number(process.env.FROG_PORT || 8080);
+const host = process.env.FROG_HOST || '127.0.0.1';
+const socket = net.connect(port, host);
 let buffer = Buffer.alloc(0);
 let upgraded = false;
 let session = 1;
@@ -24,7 +26,7 @@ function send(cmd, data) {
 socket.on('connect', () => {
   const key = crypto.randomBytes(16).toString('base64');
   socket.write(
-    `GET / HTTP/1.1\r\nHost: localhost:8080\r\nUpgrade: websocket\r\n` +
+    `GET / HTTP/1.1\r\nHost: ${host}:${port}\r\nUpgrade: websocket\r\n` +
     `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
   );
 });

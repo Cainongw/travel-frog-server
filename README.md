@@ -1,11 +1,13 @@
-# Travel Frog private server (minimal)
+# Travel Frog local archive server
 
-This is a dependency-free local WebSocket server for protocol development. It accepts the built-in TestChannel guest login and returns minimal game state plus postcard data.
+This dependency-free Node.js server provides a local login and SQLite-backed personal archive for the China edition of Travel Frog. It currently supports role settings, postcards, the album recycle bin, gift-box postcards and specialties, moments, travel notes, stories, achievements, and encyclopedia state.
+
+Requires Node.js 22.5 or newer because it uses the built-in `node:sqlite` module.
 
 Run:
 
 ```powershell
-node .\server.js
+npm start
 ```
 
 For a MuMu emulator, forward the port before starting the modified client:
@@ -13,6 +15,35 @@ For a MuMu emulator, forward the port before starting the modified client:
 ```powershell
 & 'C:\Program Files\Netease\MuMu\nx_main\adb.exe' reverse tcp:8080 tcp:8080
 ```
+
+The archive is stored at `data/travel-frog.sqlite`. Stop the server before copying that file as a manual backup. SQLite WAL files are managed automatically.
+
+## Archive API
+
+Management endpoints accept localhost connections only.
+
+List accounts:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8080/api/accounts
+```
+
+Export one account:
+
+```powershell
+Invoke-WebRequest 'http://127.0.0.1:8080/api/export?account=guest370' -OutFile .\guest370.json
+```
+
+Import or replace an account from an exported file:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8080/api/import `
+  -Method Post -ContentType application/json -InFile .\guest370.json
+```
+
+The export is a versioned JSON document. It can be inspected or edited before importing. Use a different `account.account` value to import it as a separate local account.
+
+## Seed postcard
 
 Postcards are loaded from `data/postcards.json`. Each record uses the client format:
 
@@ -26,4 +57,10 @@ Postcards are loaded from `data/postcards.json`. Each record uses the client for
 }
 ```
 
-Replace the sample array with exported account records when they become available. A different file can be selected with the `FROG_DATA` environment variable.
+`data/postcards.json` seeds newly created accounts only. Existing accounts are read from SQLite. Replace the sample array with exported records before creating an account, or use the archive import API for existing accounts. A different seed file can be selected with `FROG_DATA`; a different SQLite file can be selected with `FROG_DB`.
+
+Run the integration test:
+
+```powershell
+npm test
+```

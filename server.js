@@ -7,12 +7,14 @@ const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { FrogDatabase, normalizeAccount } = require('./database');
 
 const HOST = process.env.FROG_HOST || '0.0.0.0';
 const PORT = Number(process.env.FROG_PORT || 8080);
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 const DATA_FILE = process.env.FROG_DATA || path.join(__dirname, 'data', 'postcards.json');
+const DB_FILE = process.env.FROG_DB || path.join(__dirname, 'data', 'travel-frog.sqlite');
 
 function loadPictures() {
   const value = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
@@ -26,6 +28,7 @@ function loadPictures() {
 }
 
 const pictures = loadPictures();
+const database = new FrogDatabase(DB_FILE, pictures);
 
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
@@ -106,52 +109,42 @@ function sendEvent(client, cmd, data) {
   sendJson(client, { cmd, data });
 }
 
-function roleData(client) {
-  return {
-    uid: client.uid,
-    res: { clover_point: 0, ticket: 0 },
-    settings: {
-      client: JSON.stringify({ guideStep: 'Complete', bgSound: 1, effectSound: 1 }),
-      push_switch: false,
-      rank_switch: false,
-    },
-    misc: { picture_cnt: pictures.length, wx_push_reward: false, wx_my_reward: false, create_time: nowSeconds() },
-    frog: {
-      name: '旅行青蛙', cur_achieve: -1, achieves: [], achieves_time: [], status: 0,
-      motion: 0, icon: 0, pic_show: [], decoration: [], taobao_data: null,
-    },
-  };
-}
-
 function pushInitialState(client) {
+  const account = client.account;
   // Season 41 is bundled in the APK. Without this event the client keeps its
   // default season 00 and asks the resource loader for files that do not exist.
   sendEvent(client, 'weather_load', { season: 4, hours_type: 1, weather: 0 });
   sendEvent(client, 'client_load_events', []);
-  sendEvent(client, 'client_load_role', roleData(client));
+  sendEvent(client, 'client_load_role', database.getRole(account));
   sendEvent(client, 'client_load_decorate', { has_list: [], put_id: 0, status: 0 });
   sendEvent(client, 'clover_load_clovers', []);
   sendEvent(client, 'item_load_items', {
     house: [], bag: [-1, -1, -1, -1, -1], desk: [-1, -1, -1],
     bag_completed: false, bag_conflict: false, desk_conflict: false, gacha: { color_ball: -1 },
   });
-  sendEvent(client, 'item_load_handbook', { collections: [], specialtys: [] });
+  sendEvent(client, 'item_load_handbook', database.getHandbook(account));
   sendEvent(client, 'item_load_shop_info', { purchased: [] });
-  sendEvent(client, 'album_load_all', { id_list: pictures });
-  sendEvent(client, 'album_load_new', { pictures: [], visted_pic: [], has_ads: false, is_share: false });
-  sendEvent(client, 'album_load_recover', { pictures: [] });
-  sendEvent(client, 'travel_load_gift', { pictures: [], specialtys: [] });
-  sendEvent(client, 'travel_load_note', { note_list: [] });
+  sendEvent(client, 'album_load_all', { id_list: database.getPostcards(account, 'album') });
+  sendEvent(client, 'album_load_new', {
+    pictures: database.getPostcards(account, 'new'), visted_pic: [], has_ads: false, is_share: false,
+  });
+  sendEvent(client, 'album_load_recover', { pictures: database.getPostcards(account, 'recycle') });
+  sendEvent(client, 'travel_load_gift', database.getGiftBox(account));
+  sendEvent(client, 'travel_load_note', { note_list: database.getTravelNotes(account) });
   sendEvent(client, 'mail_load', []);
-  sendEvent(client, 'story_load', { stories: [], new_story_id: 0 });
+  sendEvent(client, 'story_load', { stories: database.getStories(account), new_story_id: 0 });
+  sendEvent(client, 'misc_moment_load', { list: database.getMoments(account) });
+  sendEvent(client, 'encyclopedia_load', database.getEncyclopedia(account));
   sendEvent(client, 'visit_load', { visitor: null });
   sendEvent(client, 'furniture_load_furniture', {
-    has_fur: [], put_fur: [], replace_fur: [],
+    has_fur: [], put_fur: [], replace_fur: [], mate_list: [], bench: [], bench_lock: false, mood: 0,
     shop: { shop_list: [], start_time: 0, leave_time: 0 },
   });
-  sendEvent(client, 'furniture_load_tumbler', { list: [] });
-  sendEvent(client, 'furniture_load_compost', { list: [] });
-  sendEvent(client, 'furniture_load_pocket', { list: [] });
+  sendEvent(client, 'furniture_load_tumbler', { show_index: 0, replace_index: 0, tumbler_list: [] });
+  sendEvent(client, 'furniture_load_compost', {
+    show_index: 0, replace_index: 0, compost_list: [], state: 0, box_index: 0, box_list: [],
+  });
+  sendEvent(client, 'furniture_load_pocket', { show_index: 0, replace_index: 0, list: [], clover: 0 });
   sendEvent(client, 'recharge_load', { water: 0, change: 0, field: [], sack: [] });
   sendEvent(client, 'task_load', { tasks: [], list: [] });
   sendEvent(client, 'task_load_list', { reward: [] });
@@ -164,36 +157,96 @@ function pushInitialState(client) {
 
 function commandData(client, request) {
   const data = request.data || {};
+  const account = client.account;
   switch (request.cmd) {
     case 'client_hello':
       return { timestamp: nowSeconds() };
     case 'hall_gen_token':
-      client.account = String(data.account || 'guest');
+      client.account = normalizeAccount(data.account);
       client.token = `local-${client.account}`;
       return { token: client.token };
     case 'hall_login':
     case 'hall_reconnect':
       client.token = String(data.token || client.token || 'local-guest');
       client.account = client.token.startsWith('local-') ? client.token.slice(6) : (client.account || 'guest');
-      client.uid = `local-${client.account}`;
+      client.account = normalizeAccount(client.account);
+      client.uid = database.ensureAccount(client.account).uid;
       client.authed = true;
       return { code: 0, account: client.account };
     case 'hall_enter_game':
       return { code: 0 };
+    case 'client_set_client':
+      database.updateSettings(account, data.client);
+      return { code: 0 };
+    case 'client_set_name':
+      database.updateAccount(account, { frog_name: String(data.name || '旅行青蛙').slice(0, 64) });
+      return { code: 0, name: String(data.name || '旅行青蛙') };
+    case 'client_rename_cost':
+      return { code: 0, cost: 0 };
+    case 'client_set_icon':
+      database.updateAccount(account, { icon: Number(data.id || 0) });
+      return { code: 0 };
+    case 'client_set_achieve':
+      database.updateAccount(account, { current_achievement: Number(data.id ?? -1) });
+      return { code: 0 };
+    case 'client_set_pic_show':
+      database.updateAccount(account, { current_picture_id: Number(data.id) });
+      return { code: 0 };
+    case 'client_switch_push':
+      database.updateAccount(account, { push_switch: data.turnon ? 1 : 0 });
+      return { code: 0, push_switch: Boolean(data.turnon) };
+    case 'client_switch_rank':
+      database.updateAccount(account, { rank_switch: data.turnon ? 1 : 0 });
+      return { code: 0, rank_switch: Boolean(data.turnon) };
     case 'album_load_all':
-      return { id_list: pictures };
+      return { id_list: database.getPostcards(account, 'album') };
     case 'album_load':
-      return { start: Number(data.start || 1), total: pictures.length, pictures };
+      return {
+        start: Number(data.start || 1),
+        total: database.countPostcards(account, 'album'),
+        pictures: database.getPostcards(account, 'album', null, data.start || 1, data.count || 20),
+      };
     case 'album_load_by_id_list':
-      return { pic_list: pictures };
+      return { pic_list: database.getPostcards(account, 'album', data.id_list || []) };
     case 'album_load_new':
-      return { pictures: [], visted_pic: [], has_ads: false, is_share: false };
+      return { pictures: database.getPostcards(account, 'new'), visted_pic: [], has_ads: false, is_share: false };
     case 'album_load_recover':
-      return { pictures: [] };
+      return { pictures: database.getPostcards(account, 'recycle') };
+    case 'album_delete':
+      return { code: database.movePostcard(account, data.id, 'album', 'recycle') ? 0 : 1 };
+    case 'album_recover':
+      return { code: database.movePostcard(account, data.id, 'recycle', 'album') ? 0 : 1 };
+    case 'album_save_new':
+      return { code: database.movePostcard(account, data.id, 'new', 'album') ? 0 : 1 };
+    case 'album_delete_new':
+      return { code: database.deletePostcard(account, data.id, 'new') ? 0 : 1 };
     case 'travel_load_gift':
-      return { pictures: [], specialtys: [] };
+      return database.getGiftBox(account);
+    case 'travel_album_to_gift':
+      return { code: database.movePostcard(account, data.picture_id, 'album', 'gift') ? 0 : 1 };
+    case 'travel_gift_to_album':
+      return { code: database.movePostcard(account, data.picture_id, 'gift', 'album') ? 0 : 1 };
+    case 'travel_gift_delete_album':
+      return { code: database.deleteGiftPostcard(account, data.id) ? 0 : 1 };
     case 'travel_load_note':
-      return { note_list: [] };
+      return { note_list: database.getTravelNotes(account) };
+    case 'travel_read_note':
+      database.markTravelNotesRead(account, data.id);
+      return { code: 0 };
+    case 'story_load':
+      return { stories: database.getStories(account), new_story_id: 0 };
+    case 'misc_moment_load':
+      return { list: database.getMoments(account) };
+    case 'misc_moment_unlock':
+      database.unlockMoment(account, data.id);
+      return { code: 0 };
+    case 'item_load_handbook':
+      return database.getHandbook(account);
+    case 'encyclopedia_load':
+      return database.getEncyclopedia(account);
+    case 'encyclopedia_set_show_sub':
+      database.setEncyclopediaShowSub(account, data.long_id);
+      return { code: 0 };
     case 'mail_load':
       return [];
     case 'mail_load_mails':
@@ -212,20 +265,87 @@ function handleMessage(client, text) {
   const cmd = request.cmd.replace('.', '_');
   request.cmd = cmd;
   console.log(`[${client.remote}] ${cmd}${request.data ? ` ${JSON.stringify(request.data)}` : ''}`);
-  const response = commandData(client, request);
-  if (cmd === 'client_load_all_info') {
-    // Push state before acknowledging the synchronization request so the
-    // client has season/role data before it starts loading scene resources.
-    pushInitialState(client);
+  try {
+    const response = commandData(client, request);
+    if (cmd === 'client_load_all_info') {
+      // Push state before acknowledging the synchronization request so the
+      // client has season/role data before it starts loading scene resources.
+      pushInitialState(client);
+      sendResponse(client, request, response);
+      return;
+    }
     sendResponse(client, request, response);
-    return;
+  } catch (error) {
+    console.error(`[${client.remote}] ${cmd} failed: ${error.message}`);
+    sendResponse(client, request, { code: 1, message: error.message });
   }
-  sendResponse(client, request, response);
 }
 
-const server = http.createServer((req, res) => {
+function sendHttpJson(res, status, value, headers = {}) {
+  const body = JSON.stringify(value, null, 2);
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
+  res.end(body);
+}
+
+function isLoopback(address) {
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > 10 * 1024 * 1024) {
+        reject(new Error('request body exceeds 10 MiB'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (_) { reject(new Error('invalid JSON body')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+  if (url.pathname === '/health') {
+    sendHttpJson(res, 200, { ok: true, database: DB_FILE, accounts: database.getAccounts().length });
+    return;
+  }
+  if (url.pathname.startsWith('/api/') && !isLoopback(req.socket.remoteAddress)) {
+    sendHttpJson(res, 403, { error: 'archive API is only available from localhost' });
+    return;
+  }
+  try {
+    if (req.method === 'GET' && url.pathname === '/api/accounts') {
+      sendHttpJson(res, 200, { accounts: database.getAccounts() });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/export') {
+      const account = normalizeAccount(url.searchParams.get('account'));
+      sendHttpJson(res, 200, database.exportAccount(account), {
+        'content-disposition': `attachment; filename="${account.replace(/[^a-zA-Z0-9._-]/g, '_')}.json"`,
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/import') {
+      const body = await readJsonBody(req);
+      const snapshot = body.save || body;
+      const imported = database.importAccount(snapshot, body.replace !== false);
+      sendHttpJson(res, 200, { ok: true, account: imported.account.account });
+      return;
+    }
+  } catch (error) {
+    sendHttpJson(res, 400, { error: error.message });
+    return;
+  }
   res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
-  res.end('travel frog private server\n');
+  res.end('travel frog private server\nhealth: /health\narchive API: /api/accounts, /api/export, /api/import\n');
 });
 
 server.on('upgrade', (req, socket) => {
@@ -255,5 +375,15 @@ server.on('upgrade', (req, socket) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`travel frog private server listening on ws://${HOST}:${PORT}`);
-  console.log(`loaded ${pictures.length} postcard(s) from ${DATA_FILE}`);
+  console.log(`SQLite archive: ${DB_FILE}`);
 });
+
+function shutdown() {
+  server.close(() => {
+    database.close();
+    process.exit(0);
+  });
+}
+
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);

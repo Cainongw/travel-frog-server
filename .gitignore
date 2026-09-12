@@ -6,4 +6,8 @@
 
 # Local overrides and logs.
 /data/*.local.json
+/data/*.sqlite
+/data/*.sqlite-shm
+/data/*.sqlite-wal
+/exports/
 *.log
