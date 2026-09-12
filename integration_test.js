@@ -58,7 +58,7 @@ function protocolClient(socket) {
   };
 }
 
-test('persists priority-one archive data and imports an export', async t => {
+test('persists archive and basic gameplay state through export and import', async t => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'travel-frog-server-'));
   const database = path.join(tempDir, 'archive.sqlite');
   const port = 20000 + Math.floor(Math.random() * 10000);
@@ -88,6 +88,9 @@ test('persists priority-one archive data and imports an export', async t => {
   assert.equal((await protocol.send('client.load_all_info')).code, 0);
   assert.ok(protocol.events.some(event => event.cmd === 'client_load_role'));
   assert.equal(protocol.events.find(event => event.cmd === 'album_load_all').data.id_list.length, 1);
+  assert.equal(protocol.events.find(event => event.cmd === 'clover_load_clovers').data.length, 20);
+  assert.equal(protocol.events.find(event => event.cmd === 'mail_load').data.length, 1);
+  assert.deepEqual(protocol.events.find(event => event.cmd === 'weather_load').data, { season: 4, hours_type: 1, weather: 0 });
 
   assert.equal((await protocol.send('client.set_name', { name: 'Archive Frog' })).code, 0);
   assert.equal((await protocol.send('misc.moment_unlock', { id: 3 })).code, 0);
@@ -96,12 +99,45 @@ test('persists priority-one archive data and imports an export', async t => {
   assert.equal((await protocol.send('album.load_all')).id_list.length, 0);
   assert.equal((await protocol.send('album.load_recover')).pictures.length, 1);
 
+  assert.equal((await protocol.send('mail.open', { id: 9000001 })).code, 0);
+  let itemState = await protocol.send('item.load_items');
+  assert.deepEqual(itemState.house, [{ item_id: 0, count: 1 }]);
+  assert.equal((await protocol.send('item.buy', { shop_id: 0 })).code, 0);
+  itemState = await protocol.send('item.load_items');
+  assert.deepEqual(itemState.house, [{ item_id: 0, count: 2 }]);
+  assert.equal((await protocol.send('item.putin_bag', { pos: 1, item_id: 0 })).code, 0);
+  itemState = await protocol.send('item.load_items');
+  assert.equal(itemState.bag[0], 0);
+  assert.deepEqual(itemState.house, [{ item_id: 0, count: 1 }]);
+  assert.equal((await protocol.send('item.putin_desk', { pos: 1, item_id: 0 })).code, 0);
+  itemState = await protocol.send('item.load_items');
+  assert.equal(itemState.desk[0], 0);
+  assert.deepEqual(itemState.house, []);
+  assert.equal((await protocol.send('clover.harvest', { clover_id: 1 })).code, 0);
+  assert.equal((await protocol.send('mail.load')).length, 0);
+
+  const weatherResponse = await fetch(`http://127.0.0.1:${port}/api/weather?account=archive-test`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ season: 2, hours_type: 3, weather: 1 }),
+  });
+  assert.deepEqual(await weatherResponse.json(), { season: 2, hours_type: 3, weather: 1 });
+
   const exportedResponse = await fetch(`http://127.0.0.1:${port}/api/export?account=archive-test`);
   assert.equal(exportedResponse.status, 200);
   const exported = await exportedResponse.json();
+  assert.equal(exported.version, 2);
   assert.equal(exported.account.frog_name, 'Archive Frog');
   assert.deepEqual(exported.moments, [3]);
   assert.equal(exported.postcards[0].location, 'recycle');
+  assert.equal(exported.account.clover, 491);
+  assert.equal(exported.items.bag[0], 0);
+  assert.equal(exported.items.desk[0], 0);
+  assert.deepEqual(exported.items.house, []);
+  assert.deepEqual(exported.shop_purchases, [{ item_id: 0, count: 1 }]);
+  assert.ok(exported.clover_plots[0].last_harvest > 0);
+  assert.equal(exported.mails[0].opened, true);
+  assert.deepEqual(exported.weather, { season: 2, hours_type: 3, weather: 1 });
 
   exported.account = { ...exported.account, account: 'archive-copy', frog_name: 'Imported Frog' };
   exported.travel_notes = [{ id: 12, read: true, timestamp: 123456 }];
@@ -130,4 +166,11 @@ test('persists priority-one archive data and imports an export', async t => {
   assert.deepEqual(copied.handbook, exported.handbook);
   assert.deepEqual(copied.encyclopedia, exported.encyclopedia);
   assert.deepEqual(copied.gift_specialties, exported.gift_specialties);
+  assert.equal(copied.account.clover, 491);
+  assert.equal(copied.items.bag[0], 0);
+  assert.equal(copied.items.desk[0], 0);
+  assert.deepEqual(copied.items.house, []);
+  assert.deepEqual(copied.shop_purchases, [{ item_id: 0, count: 1 }]);
+  assert.equal(copied.mails[0].opened, true);
+  assert.deepEqual(copied.weather, { season: 2, hours_type: 3, weather: 1 });
 });

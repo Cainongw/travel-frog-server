@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { FrogDatabase, normalizeAccount } = require('./database');
+const { SHOP_ITEMS } = require('./game_data');
 
 const HOST = process.env.FROG_HOST || '0.0.0.0';
 const PORT = Number(process.env.FROG_PORT || 8080);
@@ -111,19 +112,14 @@ function sendEvent(client, cmd, data) {
 
 function pushInitialState(client) {
   const account = client.account;
-  // Season 41 is bundled in the APK. Without this event the client keeps its
-  // default season 00 and asks the resource loader for files that do not exist.
-  sendEvent(client, 'weather_load', { season: 4, hours_type: 1, weather: 0 });
+  sendEvent(client, 'weather_load', database.getWeather(account));
   sendEvent(client, 'client_load_events', []);
   sendEvent(client, 'client_load_role', database.getRole(account));
   sendEvent(client, 'client_load_decorate', { has_list: [], put_id: 0, status: 0 });
-  sendEvent(client, 'clover_load_clovers', []);
-  sendEvent(client, 'item_load_items', {
-    house: [], bag: [-1, -1, -1, -1, -1], desk: [-1, -1, -1],
-    bag_completed: false, bag_conflict: false, desk_conflict: false, gacha: { color_ball: -1 },
-  });
+  sendEvent(client, 'clover_load_clovers', database.getCloverPlots(account));
+  sendEvent(client, 'item_load_items', database.getItemState(account));
   sendEvent(client, 'item_load_handbook', database.getHandbook(account));
-  sendEvent(client, 'item_load_shop_info', { purchased: [] });
+  sendEvent(client, 'item_load_shop_info', { purchased: database.getShopPurchases(account) });
   sendEvent(client, 'album_load_all', { id_list: database.getPostcards(account, 'album') });
   sendEvent(client, 'album_load_new', {
     pictures: database.getPostcards(account, 'new'), visted_pic: [], has_ads: false, is_share: false,
@@ -131,7 +127,7 @@ function pushInitialState(client) {
   sendEvent(client, 'album_load_recover', { pictures: database.getPostcards(account, 'recycle') });
   sendEvent(client, 'travel_load_gift', database.getGiftBox(account));
   sendEvent(client, 'travel_load_note', { note_list: database.getTravelNotes(account) });
-  sendEvent(client, 'mail_load', []);
+  sendEvent(client, 'mail_load', database.getMails(account));
   sendEvent(client, 'story_load', { stories: database.getStories(account), new_story_id: 0 });
   sendEvent(client, 'misc_moment_load', { list: database.getMoments(account) });
   sendEvent(client, 'encyclopedia_load', database.getEncyclopedia(account));
@@ -155,6 +151,16 @@ function pushInitialState(client) {
   sendEvent(client, 'adsmgr_load', { can_pop: false, can_banner: false, day_left: 0, gift_id: 0, gift_time: 0, gift_can_get: 0, gift_get: 0, item_list: [] });
 }
 
+function pushItemChanges(client, changes) {
+  for (const item of changes || []) sendEvent(client, 'item_update', { item });
+}
+
+function pushRoleResources(client, state) {
+  if (state.clover != null) sendEvent(client, 'clover_update', { clover: state.clover });
+  if (state.ticket != null) sendEvent(client, 'item_update_ticket', { ticket: state.ticket });
+  pushItemChanges(client, state.itemChanges || (state.item ? [state.item] : []));
+}
+
 function commandData(client, request) {
   const data = request.data || {};
   const account = client.account;
@@ -175,6 +181,8 @@ function commandData(client, request) {
       return { code: 0, account: client.account };
     case 'hall_enter_game':
       return { code: 0 };
+    case 'weather_load':
+      return database.getWeather(account);
     case 'client_set_client':
       database.updateSettings(account, data.client);
       return { code: 0 };
@@ -228,6 +236,16 @@ function commandData(client, request) {
       return { code: database.movePostcard(account, data.picture_id, 'gift', 'album') ? 0 : 1 };
     case 'travel_gift_delete_album':
       return { code: database.deleteGiftPostcard(account, data.id) ? 0 : 1 };
+    case 'travel_bag_to_gift': {
+      const moved = database.moveInventoryToGift(account, data.item_id);
+      if (moved.ok) pushItemChanges(client, [{ item_id: Number(data.item_id), count: moved.inventoryCount }]);
+      return { code: moved.ok ? 0 : 1 };
+    }
+    case 'travel_gift_to_bag': {
+      const moved = database.moveGiftToInventory(account, data.item_id);
+      if (moved.ok) pushItemChanges(client, [{ item_id: Number(data.item_id), count: moved.inventoryCount }]);
+      return { code: moved.ok ? 0 : 1 };
+    }
     case 'travel_load_note':
       return { note_list: database.getTravelNotes(account) };
     case 'travel_read_note':
@@ -248,11 +266,74 @@ function commandData(client, request) {
       database.setEncyclopediaShowSub(account, data.long_id);
       return { code: 0 };
     case 'mail_load':
-      return [];
+      return database.getMails(account);
     case 'mail_load_mails':
-      return { start: Number(data.start || 1), count: 0, total: 0, mails: [] };
+      return {
+        start: Number(data.start || 1),
+        count: Number(data.count || 5),
+        total: database.countMails(account),
+        mails: database.getMails(account, data.start || 1, data.count || 5),
+      };
+    case 'mail_read':
+      database.readMail(account, data.id);
+      return { code: 0 };
+    case 'mail_open': {
+      const reward = database.openMail(account, data.id);
+      if (reward.ok) pushRoleResources(client, reward);
+      return { code: reward.ok ? 0 : 1 };
+    }
     case 'item_load_items':
-      return { house: [], bag: [-1, -1, -1, -1, -1], desk: [-1, -1, -1], bag_completed: false, gacha: { color_ball: -1 } };
+      return database.getItemState(account);
+    case 'item_load_shop_info':
+      return { purchased: database.getShopPurchases(account) };
+    case 'item_buy': {
+      const shopItem = SHOP_ITEMS.get(Number(data.shop_id));
+      if (!shopItem) return false;
+      const purchase = database.purchase(account, shopItem);
+      if (!purchase.ok) return false;
+      pushRoleResources(client, {
+        clover: purchase.clover,
+        itemChanges: [{ item_id: purchase.item_id, count: purchase.item_count }],
+      });
+      return { code: 0, ticket: 0, ads_id: '', share_id: '' };
+    }
+    case 'item_putin_bag': {
+      const result = database.placeItem(account, 'bag', data.pos, data.item_id);
+      pushItemChanges(client, result.changes);
+      return { code: result.ok ? 0 : 1, conflict: result.conflict };
+    }
+    case 'item_takeout_bag': {
+      const result = database.takeItem(account, 'bag', data.pos);
+      pushItemChanges(client, result.changes);
+      return { code: result.ok ? 0 : 1, conflict: result.conflict };
+    }
+    case 'item_putin_desk': {
+      const result = database.placeItem(account, 'desk', data.pos, data.item_id);
+      pushItemChanges(client, result.changes);
+      return { code: result.ok ? 0 : 1, conflict: result.conflict };
+    }
+    case 'item_takeout_desk': {
+      const result = database.takeItem(account, 'desk', data.pos);
+      pushItemChanges(client, result.changes);
+      return { code: result.ok ? 0 : 1, conflict: result.conflict };
+    }
+    case 'item_set_bag_completed':
+      database.setBagCompleted(account, data.completed);
+      return { code: 0 };
+    case 'clover_load_clovers':
+      return database.getCloverPlots(account);
+    case 'clover_harvest': {
+      const result = database.harvestClover(account, data.clover_id);
+      if (result.ok) pushRoleResources(client, result);
+      return { clover_id: Number(data.clover_id), code: result.ok || result.duplicate ? 0 : 1 };
+    }
+    case 'clover_harvest_resend': {
+      for (const item of data.list || []) {
+        const result = database.harvestClover(account, item.clover_id, item.time);
+        if (result.ok) pushRoleResources(client, result);
+      }
+      return database.getCloverPlots(account);
+    }
     default:
       return { code: 0 };
   }
@@ -340,12 +421,23 @@ const server = http.createServer(async (req, res) => {
       sendHttpJson(res, 200, { ok: true, account: imported.account.account });
       return;
     }
+    if (url.pathname === '/api/weather') {
+      const account = normalizeAccount(url.searchParams.get('account'));
+      if (req.method === 'GET') {
+        sendHttpJson(res, 200, database.getWeather(account));
+        return;
+      }
+      if (req.method === 'POST') {
+        sendHttpJson(res, 200, database.setWeather(account, await readJsonBody(req)));
+        return;
+      }
+    }
   } catch (error) {
     sendHttpJson(res, 400, { error: error.message });
     return;
   }
   res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
-  res.end('travel frog private server\nhealth: /health\narchive API: /api/accounts, /api/export, /api/import\n');
+  res.end('travel frog private server\nhealth: /health\narchive API: /api/accounts, /api/export, /api/import, /api/weather\n');
 });
 
 server.on('upgrade', (req, socket) => {
