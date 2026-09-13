@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const { FrogDatabase, normalizeAccount } = require('./database');
 const { SHOP_ITEMS } = require('./game_data');
+const { TRAVEL_ROUTES, selectTrip, makePostcard } = require('./travel_data');
 
 const HOST = process.env.FROG_HOST || '0.0.0.0';
 const PORT = Number(process.env.FROG_PORT || 8080);
@@ -16,6 +17,7 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 const DATA_FILE = process.env.FROG_DATA || path.join(__dirname, 'data', 'postcards.json');
 const DB_FILE = process.env.FROG_DB || path.join(__dirname, 'data', 'travel-frog.sqlite');
+const TRIP_SECONDS = Math.max(1, Number(process.env.FROG_TRIP_SECONDS || 60));
 
 function loadPictures() {
   const value = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
@@ -30,6 +32,7 @@ function loadPictures() {
 
 const pictures = loadPictures();
 const database = new FrogDatabase(DB_FILE, pictures);
+const clients = new Set();
 
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
@@ -112,8 +115,9 @@ function sendEvent(client, cmd, data) {
 
 function pushInitialState(client) {
   const account = client.account;
+  database.advanceTravel(account, TRAVEL_ROUTES, makePostcard);
   sendEvent(client, 'weather_load', database.getWeather(account));
-  sendEvent(client, 'client_load_events', []);
+  sendEvent(client, 'client_load_events', database.getTravelEvents(account));
   sendEvent(client, 'client_load_role', database.getRole(account));
   sendEvent(client, 'client_load_decorate', { has_list: [], put_id: 0, status: 0 });
   sendEvent(client, 'clover_load_clovers', database.getCloverPlots(account));
@@ -159,6 +163,38 @@ function pushRoleResources(client, state) {
   if (state.clover != null) sendEvent(client, 'clover_update', { clover: state.clover });
   if (state.ticket != null) sendEvent(client, 'item_update_ticket', { ticket: state.ticket });
   pushItemChanges(client, state.itemChanges || (state.item ? [state.item] : []));
+}
+
+function pushTravelCompletion(client, result) {
+  sendEvent(client, 'client_load_role', database.getRole(client.account));
+  sendEvent(client, 'item_load_items', database.getItemState(client.account));
+  pushItemChanges(client, result.itemChanges);
+  sendEvent(client, 'item_load_handbook', database.getHandbook(client.account));
+  sendEvent(client, 'travel_load_note', { note_list: database.getTravelNotes(client.account) });
+  sendEvent(client, 'album_load_new', {
+    pictures: database.getPostcards(client.account, 'new'), visted_pic: [], has_ads: false, is_share: false,
+  });
+  const mail = database.getMail(client.account, result.mailId);
+  if (mail) sendEvent(client, 'notify_new_mail', { mail });
+  const events = database.getTravelEvents(client.account);
+  for (const eventId of result.eventIds) {
+    const event = events.find(item => item.id === eventId);
+    if (event) sendEvent(client, 'notify_new_event', { event });
+  }
+}
+
+function settleConnectedTrips() {
+  const accounts = new Map();
+  for (const client of clients) {
+    if (client.authed && !client.socket.destroyed) {
+      if (!accounts.has(client.account)) accounts.set(client.account, []);
+      accounts.get(client.account).push(client);
+    }
+  }
+  for (const [account, accountClients] of accounts) {
+    const result = database.advanceTravel(account, TRAVEL_ROUTES, makePostcard);
+    if (result) for (const client of accountClients) pushTravelCompletion(client, result);
+  }
 }
 
 function commandData(client, request) {
@@ -251,6 +287,9 @@ function commandData(client, request) {
     case 'travel_read_note':
       database.markTravelNotesRead(account, data.id);
       return { code: 0 };
+    case 'client_confirm_event':
+      database.confirmTravelEvent(account, data.id);
+      return { code: 0 };
     case 'story_load':
       return { stories: database.getStories(account), new_story_id: 0 };
     case 'misc_moment_load':
@@ -317,9 +356,23 @@ function commandData(client, request) {
       pushItemChanges(client, result.changes);
       return { code: result.ok ? 0 : 1, conflict: result.conflict };
     }
-    case 'item_set_bag_completed':
+    case 'item_set_bag_completed': {
       database.setBagCompleted(account, data.completed);
+      if (data.completed) {
+        const selection = selectTrip(database.getTripCount(account) + 1);
+        const started = database.startTravel(account, selection.route, selection.companionId, TRIP_SECONDS);
+        if (!started.ok) {
+          database.setBagCompleted(account, false);
+          sendEvent(client, 'item_load_items', database.getItemState(account));
+          return { code: 1, message: started.reason };
+        }
+        sendEvent(client, 'client_load_role', database.getRole(account));
+        sendEvent(client, 'item_load_items', database.getItemState(account));
+        const event = database.getTravelEvents(account).find(item => item.id === started.eventId);
+        if (event) sendEvent(client, 'notify_new_event', { event });
+      }
       return { code: 0 };
+    }
     case 'clover_load_clovers':
       return database.getCloverPlots(account);
     case 'clover_harvest': {
@@ -449,6 +502,7 @@ server.on('upgrade', (req, socket) => {
     `Sec-WebSocket-Accept: ${accept}\r\n\r\n`);
 
   const client = { socket, remote: req.socket.remoteAddress, buffer: Buffer.alloc(0), account: 'guest', uid: 'local-guest', authed: false };
+  clients.add(client);
   socket.on('data', chunk => {
     client.buffer = Buffer.concat([client.buffer, chunk]);
     let parsed;
@@ -461,7 +515,10 @@ server.on('upgrade', (req, socket) => {
     }
   });
   socket.on('error', () => {});
-  socket.on('close', () => console.log(`[${client.remote}] disconnected`));
+  socket.on('close', () => {
+    clients.delete(client);
+    console.log(`[${client.remote}] disconnected`);
+  });
   console.log(`[${client.remote}] connected`);
 });
 
@@ -470,7 +527,11 @@ server.listen(PORT, HOST, () => {
   console.log(`SQLite archive: ${DB_FILE}`);
 });
 
+const travelTimer = setInterval(settleConnectedTrips, 1000);
+travelTimer.unref();
+
 function shutdown() {
+  clearInterval(travelTimer);
   server.close(() => {
     database.close();
     process.exit(0);

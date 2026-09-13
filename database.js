@@ -161,6 +161,9 @@ class FrogDatabase {
     this.ensureColumn('accounts', 'season', 'INTEGER NOT NULL DEFAULT 4');
     this.ensureColumn('accounts', 'hours_type', 'INTEGER NOT NULL DEFAULT 1');
     this.ensureColumn('accounts', 'weather', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('accounts', 'frog_status', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('accounts', 'frog_motion', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('accounts', 'trip_count', 'INTEGER NOT NULL DEFAULT 0');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS inventory (
@@ -206,7 +209,30 @@ class FrogDatabase {
       );
       CREATE INDEX IF NOT EXISTS mails_opened ON mails(account, opened, timestamp DESC);
 
-      PRAGMA user_version = 2;
+      CREATE TABLE IF NOT EXISTS travel_trips (
+        account TEXT PRIMARY KEY REFERENCES accounts(account) ON DELETE CASCADE,
+        trip_number INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('traveling')),
+        route_id INTEGER NOT NULL,
+        companion_id INTEGER NOT NULL DEFAULT -1,
+        started_at INTEGER NOT NULL,
+        returns_at INTEGER NOT NULL,
+        completed_at INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS travel_events (
+        account TEXT NOT NULL REFERENCES accounts(account) ON DELETE CASCADE,
+        event_id INTEGER NOT NULL,
+        evt_type INTEGER NOT NULL,
+        evt_id INTEGER NOT NULL DEFAULT 0,
+        evt_value_json TEXT NOT NULL DEFAULT '[]',
+        evt_string_json TEXT NOT NULL DEFAULT '[]',
+        evt_pic_json TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (account, event_id)
+      );
+
+      PRAGMA user_version = 3;
     `);
 
     for (const row of this.db.prepare('SELECT account FROM accounts').all()) this.seedBasicState(row.account);
@@ -311,8 +337,8 @@ class FrogDatabase {
         cur_achieve: row.current_achievement,
         achieves: achievements.map(item => item.id),
         achieves_time: achievements,
-        status: 0,
-        motion: 0,
+        status: Number(row.frog_status || 0),
+        motion: Number(row.frog_motion || 0),
         icon: row.icon,
         pic_show: currentPicture,
         decoration: [],
@@ -331,6 +357,7 @@ class FrogDatabase {
       ['created_at', 'created_at'], ['bag_json', 'bag_json'], ['desk_json', 'desk_json'],
       ['bag_completed', 'bag_completed'], ['season', 'season'], ['hours_type', 'hours_type'],
       ['weather', 'weather'],
+      ['frog_status', 'frog_status'], ['frog_motion', 'frog_motion'], ['trip_count', 'trip_count'],
     ]);
     const entries = Object.entries(fields).filter(([key]) => allowed.has(key));
     if (!entries.length) return;
@@ -425,6 +452,146 @@ class FrogDatabase {
 
   setBagCompleted(value, completed) {
     this.updateAccount(value, { bag_completed: completed ? 1 : 0 });
+  }
+
+  getTravelEvents(value) {
+    const account = normalizeAccount(value);
+    this.ensureAccount(account);
+    return this.db.prepare(`
+      SELECT event_id AS id, evt_type, evt_id,
+        evt_value_json, evt_string_json, evt_pic_json
+      FROM travel_events WHERE account = ? ORDER BY event_id
+    `).all(account).map(row => ({
+      id: Number(row.id),
+      evt_type: Number(row.evt_type),
+      evt_id: Number(row.evt_id),
+      evt_value: parseJson(row.evt_value_json, []),
+      evt_string: parseJson(row.evt_string_json, []),
+      evt_pic: parseJson(row.evt_pic_json, []),
+    }));
+  }
+
+  confirmTravelEvent(value, eventId) {
+    return this.db.prepare('DELETE FROM travel_events WHERE account = ? AND event_id = ?')
+      .run(normalizeAccount(value), Number(eventId)).changes > 0;
+  }
+
+  getTravelState(value) {
+    const account = normalizeAccount(value);
+    this.ensureAccount(account);
+    const row = this.db.prepare('SELECT * FROM travel_trips WHERE account = ?').get(account);
+    if (!row) return null;
+    return {
+      trip_number: Number(row.trip_number),
+      state: row.state,
+      route_id: Number(row.route_id),
+      companion_id: Number(row.companion_id),
+      started_at: Number(row.started_at),
+      returns_at: Number(row.returns_at),
+      completed_at: row.completed_at == null ? null : Number(row.completed_at),
+    };
+  }
+
+  getTripCount(value) {
+    const row = this.ensureAccount(value);
+    return Number(row.trip_count || 0);
+  }
+
+  nextPostcardId(account) {
+    const row = this.db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM postcards WHERE account = ?').get(account);
+    return Math.max(1, Number(row.id) + 1);
+  }
+
+  addPostcard(value, postcard, location = 'new', timestamp = null) {
+    const account = normalizeAccount(value);
+    this.ensureAccount(account);
+    const now = Number(timestamp) || Math.floor(Date.now() / 1000);
+    this.db.prepare(`
+      INSERT INTO postcards(account,id,pic_id,layers_json,for_ads,visit,location,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(account,id) DO UPDATE SET pic_id=excluded.pic_id,layers_json=excluded.layers_json,
+        for_ads=excluded.for_ads,visit=excluded.visit,location=excluded.location,updated_at=excluded.updated_at
+    `).run(account, Number(postcard.id), Number(postcard.pic_id), stringify(postcard.layers, []),
+      postcard.for_ads ? 1 : 0, postcard.visit ? 1 : 0, location, now, now);
+    return postcard;
+  }
+
+  startTravel(value, route, companionId, durationSeconds, timestamp = null) {
+    const account = normalizeAccount(value);
+    this.ensureAccount(account);
+    const now = Number(timestamp) || Math.floor(Date.now() / 1000);
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM accounts WHERE account = ?').get(account);
+      if (Number(row.frog_status) !== 0) return { ok: false, reason: 'frog is already traveling' };
+      if (!Number(row.bag_completed)) return { ok: false, reason: 'bag is not completed' };
+      const bag = parseJson(row.bag_json, [-1, -1, -1, -1, -1]);
+      if (Number(bag[0]) < 0) return { ok: false, reason: 'travel food is required' };
+      const tripNumber = Number(row.trip_count || 0) + 1;
+      const returnsAt = now + Math.max(1, Number(durationSeconds) || 60);
+      this.db.prepare(`UPDATE accounts SET frog_status=1,frog_motion=1,trip_count=?,updated_at=? WHERE account=?`)
+        .run(tripNumber, now, account);
+      this.db.prepare(`
+        INSERT INTO travel_trips(account,trip_number,state,route_id,companion_id,started_at,returns_at)
+        VALUES (?,?,?,?,?,?,?)
+      `).run(account, tripNumber, 'traveling', route.id, companionId, now, returnsAt);
+      const eventId = now * 1000 + (tripNumber % 1000);
+      this.db.prepare(`
+        INSERT INTO travel_events(account,event_id,evt_type,evt_id,evt_value_json,evt_string_json,evt_pic_json,created_at)
+        VALUES (?,?,?,?,?,?,?,?)
+      `).run(account, eventId, 1, route.id, JSON.stringify([0, 0]), JSON.stringify([route.destination]), '[]', now);
+      return { ok: true, trip: { trip_number: tripNumber, route_id: route.id, companion_id: companionId, started_at: now, returns_at: returnsAt }, eventId };
+    });
+  }
+
+  completeTravel(value, route, companionId, makePostcard, timestamp = null) {
+    const account = normalizeAccount(value);
+    this.ensureAccount(account);
+    const now = Number(timestamp) || Math.floor(Date.now() / 1000);
+    return this.transaction(() => {
+      const trip = this.db.prepare('SELECT * FROM travel_trips WHERE account = ?').get(account);
+      if (!trip || Number(trip.returns_at) > now) return null;
+      const accountRow = this.db.prepare('SELECT * FROM accounts WHERE account = ?').get(account);
+      const bag = parseJson(accountRow.bag_json, [-1, -1, -1, -1, -1]);
+      const itemChanges = [];
+      for (let i = 1; i < bag.length; i++) {
+        const itemId = Number(bag[i]);
+        if (itemId >= 0) itemChanges.push({ item_id: itemId, count: this.changeInventory(account, itemId, 1) });
+      }
+      const postcardId = this.nextPostcardId(account);
+      const specialtyId = Number(route.specialtyId);
+      const postcard = makePostcard(route, companionId, postcardId);
+      this.addPostcard(account, postcard, 'new', now);
+      const note = this.db.prepare(`
+        INSERT OR IGNORE INTO travel_notes(account,note_id,is_read,timestamp) VALUES (?,?,0,?)
+      `).run(account, Number(route.noteId), now);
+      this.db.prepare('INSERT OR IGNORE INTO handbook(account,kind,item_id) VALUES (?,?,?)')
+        .run(account, 'specialty', specialtyId);
+      itemChanges.push({ item_id: specialtyId, count: this.changeInventory(account, specialtyId, 1) });
+      const mailId = now * 1000 + 500 + (Number(trip.trip_number) % 500);
+      this.db.prepare(`
+        INSERT OR REPLACE INTO mails(account,id,type,sender,timestamp,title,message,resource_json,items_json,pictures_json)
+        VALUES (?,?,11,0,?,?,?,?,?,?)
+      `).run(account, mailId, now, `${route.destination}的明信片`, `${route.destination}旅行归来，带回了特产。`,
+        '{}', JSON.stringify([]), JSON.stringify([postcardId]));
+      this.db.prepare(`UPDATE accounts SET frog_status=0,frog_motion=0,bag_json=?,bag_completed=0,updated_at=? WHERE account=?`)
+        .run(JSON.stringify([-1, -1, -1, -1, -1]), now, account);
+      this.db.prepare('DELETE FROM travel_trips WHERE account = ?').run(account);
+      const backHomeId = now * 1000 + 700 + (Number(trip.trip_number) % 300);
+      this.db.prepare(`
+        INSERT INTO travel_events(account,event_id,evt_type,evt_id,evt_value_json,evt_string_json,evt_pic_json,created_at)
+        VALUES (?,?,?,?,?,?,?,?)
+      `).run(account, backHomeId, 2, route.id, JSON.stringify([0, 0, 0, 0, -1, specialtyId]), JSON.stringify([route.destination]), '[]', now);
+      return { route, companionId, postcard, itemChanges, noteAdded: note.changes > 0, mailId, eventIds: [backHomeId] };
+    });
+  }
+
+  advanceTravel(value, routes, makePostcard, timestamp = null) {
+    const account = normalizeAccount(value);
+    const state = this.getTravelState(account);
+    if (!state) return null;
+    const route = routes.find(item => item.id === state.route_id);
+    if (!route || state.returns_at > (Number(timestamp) || Math.floor(Date.now() / 1000))) return null;
+    return this.completeTravel(account, route, state.companion_id, makePostcard, timestamp);
   }
 
   getShopPurchases(value) {
@@ -538,6 +705,12 @@ class FrogDatabase {
       rows = this.db.prepare('SELECT * FROM mails WHERE account = ? AND opened = 0 ORDER BY timestamp DESC, id DESC').all(account);
     }
     return rows.map(row => this.rowToMail(row));
+  }
+
+  getMail(value, id) {
+    const row = this.db.prepare('SELECT * FROM mails WHERE account = ? AND id = ? AND opened = 0')
+      .get(normalizeAccount(value), Number(id));
+    return row ? this.rowToMail(row) : null;
   }
 
   countMails(value) {
@@ -712,7 +885,7 @@ class FrogDatabase {
     const encyclopedia = this.getEncyclopedia(account);
     return {
       format: 'travel-frog-save',
-      version: 2,
+      version: 3,
       exported_at: Math.floor(Date.now() / 1000),
       account: {
         account: row.account,
@@ -727,6 +900,9 @@ class FrogDatabase {
         rank_switch: Boolean(row.rank_switch),
         settings: parseJson(row.settings_json, DEFAULT_SETTINGS),
         created_at: row.created_at,
+        frog_status: Number(row.frog_status || 0),
+        frog_motion: Number(row.frog_motion || 0),
+        trip_count: Number(row.trip_count || 0),
       },
       postcards: ['album', 'new', 'recycle', 'gift'].flatMap(location =>
         this.getPostcards(account, location).map(postcard => ({ ...postcard, location }))),
@@ -745,11 +921,15 @@ class FrogDatabase {
       mails: this.db.prepare('SELECT * FROM mails WHERE account = ? ORDER BY timestamp DESC, id DESC')
         .all(account).map(mail => this.rowToMail(mail)),
       weather: this.getWeather(account),
+      travel: {
+        current: this.getTravelState(account),
+        events: this.getTravelEvents(account),
+      },
     };
   }
 
   importAccount(snapshot, replace = true) {
-    if (!snapshot || snapshot.format !== 'travel-frog-save' || ![1, 2].includes(snapshot.version)) {
+    if (!snapshot || snapshot.format !== 'travel-frog-save' || ![1, 2, 3].includes(snapshot.version)) {
       throw new Error('unsupported save format');
     }
     const sourceAccount = typeof snapshot.account === 'string' ? { account: snapshot.account } : snapshot.account;
@@ -760,7 +940,7 @@ class FrogDatabase {
       if (replace) {
         for (const table of ['postcards', 'moments', 'travel_notes', 'stories', 'handbook', 'achievements',
           'encyclopedia_unlocks', 'encyclopedia_show_sub', 'gift_specialties', 'inventory', 'shop_purchases',
-          'clover_plots', 'mails']) {
+          'clover_plots', 'mails', 'travel_trips', 'travel_events']) {
           this.db.prepare(`DELETE FROM ${table} WHERE account = ?`).run(account);
         }
       }
@@ -782,6 +962,9 @@ class FrogDatabase {
         season: Number((snapshot.weather && snapshot.weather.season) || 4),
         hours_type: Number((snapshot.weather && snapshot.weather.hours_type) || 1),
         weather: Number((snapshot.weather && snapshot.weather.weather) || 0),
+        frog_status: Number(sourceAccount.frog_status || 0),
+        frog_motion: Number(sourceAccount.frog_motion || 0),
+        trip_count: Number(sourceAccount.trip_count || 0),
       });
 
       const insertPostcard = this.db.prepare(`
@@ -891,6 +1074,26 @@ class FrogDatabase {
           Number(mail.timestamp || 0), String(mail.title || ''), String(mail.message || ''), Number(mail.expire || 0),
           mail.auto_open ? 1 : 0, mail.read ? 1 : 0, mail.opened ? 1 : 0, stringify(mail.resource, {}),
           stringify(mail.items, []), stringify(mail.pictures, []));
+      }
+
+      const currentTrip = snapshot.travel && snapshot.travel.current;
+      if (currentTrip && currentTrip.state === 'traveling') {
+        this.db.prepare(`
+          INSERT OR REPLACE INTO travel_trips
+            (account,trip_number,state,route_id,companion_id,started_at,returns_at,completed_at)
+          VALUES (?,?,?,?,?,?,?,?)
+        `).run(account, Number(currentTrip.trip_number), 'traveling', Number(currentTrip.route_id),
+          Number(currentTrip.companion_id ?? -1), Number(currentTrip.started_at), Number(currentTrip.returns_at),
+          currentTrip.completed_at == null ? null : Number(currentTrip.completed_at));
+      }
+      const insertEvent = this.db.prepare(`
+        INSERT OR REPLACE INTO travel_events
+          (account,event_id,evt_type,evt_id,evt_value_json,evt_string_json,evt_pic_json,created_at)
+        VALUES (?,?,?,?,?,?,?,?)
+      `);
+      for (const event of (snapshot.travel && snapshot.travel.events) || []) {
+        insertEvent.run(account, Number(event.id), Number(event.evt_type), Number(event.evt_id || 0),
+          stringify(event.evt_value, []), stringify(event.evt_string, []), stringify(event.evt_pic, []), now);
       }
 
       this.seedBasicState(account);
