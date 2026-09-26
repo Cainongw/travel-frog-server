@@ -144,7 +144,7 @@ test('persists archive and basic gameplay state through export and import', asyn
   const exportedResponse = await fetch(`http://127.0.0.1:${port}/api/export?account=archive-test`);
   assert.equal(exportedResponse.status, 200);
   const exported = await exportedResponse.json();
-  assert.equal(exported.version, 3);
+  assert.equal(exported.version, 4);
   assert.equal(exported.account.frog_name, 'Archive Frog');
   assert.deepEqual(exported.moments, [3]);
   assert.equal(exported.postcards[0].location, 'recycle');
@@ -246,7 +246,7 @@ test('runs a persistent travel loop and settles native client rewards', async t 
   await protocol.send('client.confirm_event', { id: goTravel.id });
   await protocol.send('client.confirm_event', { id: backHomeMessage.data.event.id });
   const exported = await (await fetch(`http://127.0.0.1:${port}/api/export?account=trip-test`)).json();
-  assert.equal(exported.version, 3);
+  assert.equal(exported.version, 4);
   assert.equal(exported.account.trip_count, 1);
   assert.equal(exported.account.frog_status, 0);
   assert.equal(exported.travel.current, null);
@@ -279,4 +279,56 @@ test('settles an elapsed trip after the SQLite archive is reopened', t => {
   assert.equal(database.getPostcards('offline-test', 'new').length, 1);
   assert.equal(database.getTravelState('offline-test'), null);
   database.close();
+});
+
+test('runs the native visitor visit flow and persists acquired provinces', async t => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'travel-frog-visitor-'));
+  const database = path.join(tempDir, 'archive.sqlite');
+  const port = 20000 + Math.floor(Math.random() * 10000);
+  const child = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
+    cwd: __dirname,
+    env: {
+      ...process.env,
+      FROG_HOST: '127.0.0.1',
+      FROG_PORT: String(port),
+      FROG_DB: database,
+      FROG_VISIT_SECONDS: '60',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  t.after(async () => {
+    if (child.exitCode == null) {
+      const exited = new Promise(resolve => child.once('exit', resolve));
+      child.kill('SIGTERM');
+      await exited;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  await waitForServer(child);
+  const socket = await openWebSocket(`ws://127.0.0.1:${port}`);
+  t.after(() => socket.close());
+  const protocol = protocolClient(socket);
+  const token = await protocol.send('hall.gen_token', { account: 'visitor-test' });
+  await protocol.send('hall.login', { token: token.token });
+  await protocol.send('client.load_all_info');
+
+  const initialVisit = protocol.events.find(event => event.cmd === 'visit_load').data;
+  assert.equal(initialVisit.visitor.first, true);
+  assert.equal(initialVisit.visitor.city, '北京_北京');
+  assert.equal(initialVisit.visitor.carpet, 0);
+  assert.deepEqual(initialVisit.acquire, []);
+  assert.equal((await protocol.send('visit.set_carpet', { id: 4 })).code, 0);
+  assert.equal((await protocol.send('visit.set_expire_time', { time: Math.floor(Date.now() / 1000) + 300 })).code, 0);
+  assert.equal((await protocol.send('visit.open')).code, 0);
+  const openedVisit = protocol.events.filter(event => event.cmd === 'visit_load').at(-1).data;
+  assert.equal(openedVisit.visitor, null);
+  assert.deepEqual(openedVisit.acquire, ['北京']);
+  assert.equal((await protocol.send('visit.open')).code, 1);
+
+  const exported = await (await fetch(`http://127.0.0.1:${port}/api/export?account=visitor-test`)).json();
+  assert.equal(exported.version, 4);
+  assert.equal(exported.visitor.current, null);
+  assert.deepEqual(exported.visitor.acquire, ['北京']);
+  assert.ok(exported.visitor.next_visit_at > Math.floor(Date.now() / 1000));
 });

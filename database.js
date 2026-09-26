@@ -232,7 +232,21 @@ class FrogDatabase {
         PRIMARY KEY (account, event_id)
       );
 
-      PRAGMA user_version = 3;
+      CREATE TABLE IF NOT EXISTS visitor_state (
+        account TEXT PRIMARY KEY REFERENCES accounts(account) ON DELETE CASCADE,
+        visitor_json TEXT,
+        next_visit_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS visitor_acquire (
+        account TEXT NOT NULL REFERENCES accounts(account) ON DELETE CASCADE,
+        province TEXT NOT NULL,
+        acquired_at INTEGER NOT NULL,
+        PRIMARY KEY (account, province)
+      );
+
+      PRAGMA user_version = 4;
     `);
 
     for (const row of this.db.prepare('SELECT account FROM accounts').all()) this.seedBasicState(row.account);
@@ -302,6 +316,10 @@ class FrogDatabase {
         (account,id,type,sender,timestamp,title,message,resource_json,items_json,pictures_json)
       VALUES (?,9000001,3,0,?,'本地存档已启用','领取一些三叶草和旅行食品，开始离线生活。',?,?, '[]')
     `).run(account, Math.floor(Date.now() / 1000), JSON.stringify(resource), JSON.stringify(items));
+    this.db.prepare(`
+      INSERT OR IGNORE INTO visitor_state(account,visitor_json,next_visit_at,updated_at)
+      VALUES (?,NULL,0,?)
+    `).run(account, Math.floor(Date.now() / 1000));
   }
 
   getAccounts() {
@@ -594,6 +612,106 @@ class FrogDatabase {
     return this.completeTravel(account, route, state.companion_id, makePostcard, timestamp);
   }
 
+  getVisitorAcquire(value) {
+    const account = normalizeAccount(value);
+    this.ensureAccount(account);
+    return this.db.prepare(
+      'SELECT province FROM visitor_acquire WHERE account = ? ORDER BY acquired_at, province',
+    ).all(account).map(row => row.province);
+  }
+
+  createVisitor(account, now, durationSeconds) {
+    const acquired = this.getVisitorAcquire(account);
+    const provinces = ['北京', '上海', '广东', '四川', '浙江', '云南', '海外'];
+    const sequence = this.db.prepare('SELECT COUNT(*) AS count FROM visitor_acquire WHERE account = ?').get(account).count;
+    const province = provinces[Number(sequence) % provinces.length];
+    const partner = Number(sequence) % 3;
+    const names = ['壁虎', '刺猬', '萤火虫'];
+    const visitor = {
+      partner,
+      name: names[partner],
+      title: 0,
+      expire_time: now + Math.max(60, Number(durationSeconds) || 1800),
+      city: `${province}_${province}`,
+      food: Number(sequence) % 3,
+      first: !acquired.includes(province),
+      gift: { item_id: 100001, count: 1 },
+      carpet: 0,
+    };
+    this.db.prepare(`
+      UPDATE visitor_state SET visitor_json = ?, updated_at = ? WHERE account = ?
+    `).run(JSON.stringify(visitor), now, account);
+    return visitor;
+  }
+
+  getVisitorState(value, timestamp = null, durationSeconds = 1800) {
+    const account = normalizeAccount(value);
+    this.ensureAccount(account);
+    const now = Number(timestamp) || Math.floor(Date.now() / 1000);
+    let row = this.db.prepare('SELECT * FROM visitor_state WHERE account = ?').get(account);
+    if (!row) {
+      this.db.prepare('INSERT INTO visitor_state(account,visitor_json,next_visit_at,updated_at) VALUES (?,NULL,0,?)')
+        .run(account, now);
+      row = this.db.prepare('SELECT * FROM visitor_state WHERE account = ?').get(account);
+    }
+    let visitor = parseJson(row.visitor_json, null);
+    if (visitor && Number(visitor.expire_time) > 0 && Number(visitor.expire_time) <= now) {
+      this.db.prepare('UPDATE visitor_state SET visitor_json = NULL, next_visit_at = ?, updated_at = ? WHERE account = ?')
+        .run(now + Math.max(60, Number(durationSeconds) || 1800), now, account);
+      visitor = null;
+      row = this.db.prepare('SELECT * FROM visitor_state WHERE account = ?').get(account);
+    }
+    if (!visitor && Number(row.next_visit_at) <= now) visitor = this.createVisitor(account, now, durationSeconds);
+    return { visitor, acquire: this.getVisitorAcquire(account) };
+  }
+
+  setVisitorField(value, field, fieldValue) {
+    const account = normalizeAccount(value);
+    this.ensureAccount(account);
+    const row = this.db.prepare('SELECT visitor_json FROM visitor_state WHERE account = ?').get(account);
+    const visitor = parseJson(row && row.visitor_json, null);
+    if (!visitor) return false;
+    if (field === 'carpet') visitor.carpet = Math.max(1, Math.min(8, Number(fieldValue)));
+    if (field === 'expire_time') visitor.expire_time = Math.max(Math.floor(Date.now() / 1000), Number(fieldValue));
+    this.db.prepare('UPDATE visitor_state SET visitor_json = ?, updated_at = ? WHERE account = ?')
+      .run(JSON.stringify(visitor), Math.floor(Date.now() / 1000), account);
+    return true;
+  }
+
+  openVisitor(value, durationSeconds = 1800, timestamp = null) {
+    const account = normalizeAccount(value);
+    this.ensureAccount(account);
+    const now = Number(timestamp) || Math.floor(Date.now() / 1000);
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT visitor_json FROM visitor_state WHERE account = ?').get(account);
+      const visitor = parseJson(row && row.visitor_json, null);
+      if (!visitor || (Number(visitor.expire_time) > 0 && Number(visitor.expire_time) <= now)) {
+        return { ok: false, reason: 'visitor is no longer here' };
+      }
+      let reward = { item_id: 0, count: 0 };
+      if (visitor.first) {
+        const province = String(visitor.city || '').split('_')[0];
+        if (province) this.db.prepare(
+          'INSERT OR IGNORE INTO visitor_acquire(account,province,acquired_at) VALUES (?,?,?)',
+        ).run(account, province, now);
+      } else {
+        reward = { item_id: Number(visitor.gift && visitor.gift.item_id || 0), count: Number(visitor.gift && visitor.gift.count || 0) };
+        if (reward.item_id === 100000) {
+          this.db.prepare('UPDATE accounts SET clover = clover + ?, updated_at = ? WHERE account = ?')
+            .run(reward.count, now, account);
+        } else if (reward.item_id === 100001) {
+          this.db.prepare('UPDATE accounts SET ticket = ticket + ?, updated_at = ? WHERE account = ?')
+            .run(reward.count, now, account);
+        } else if (reward.item_id > 0 && reward.count > 0) {
+          this.changeInventory(account, reward.item_id, reward.count);
+        }
+      }
+      this.db.prepare('UPDATE visitor_state SET visitor_json = NULL, next_visit_at = ?, updated_at = ? WHERE account = ?')
+        .run(now + Math.max(60, Number(durationSeconds) || 1800), now, account);
+      return { ok: true, first: Boolean(visitor.first), reward, acquire: this.getVisitorAcquire(account) };
+    });
+  }
+
   getShopPurchases(value) {
     return this.db.prepare('SELECT shop_id AS item_id, count FROM shop_purchases WHERE account = ? AND count > 0 ORDER BY shop_id')
       .all(normalizeAccount(value));
@@ -883,9 +1001,12 @@ class FrogDatabase {
     const row = this.db.prepare('SELECT * FROM accounts WHERE account = ?').get(account);
     if (!row) throw new Error(`account not found: ${account}`);
     const encyclopedia = this.getEncyclopedia(account);
+    const visitorRow = this.db.prepare(
+      'SELECT visitor_json, next_visit_at FROM visitor_state WHERE account = ?',
+    ).get(account);
     return {
       format: 'travel-frog-save',
-      version: 3,
+      version: 4,
       exported_at: Math.floor(Date.now() / 1000),
       account: {
         account: row.account,
@@ -925,11 +1046,16 @@ class FrogDatabase {
         current: this.getTravelState(account),
         events: this.getTravelEvents(account),
       },
+      visitor: {
+        current: parseJson(visitorRow && visitorRow.visitor_json, null),
+        next_visit_at: Number((visitorRow && visitorRow.next_visit_at) || 0),
+        acquire: this.getVisitorAcquire(account),
+      },
     };
   }
 
   importAccount(snapshot, replace = true) {
-    if (!snapshot || snapshot.format !== 'travel-frog-save' || ![1, 2, 3].includes(snapshot.version)) {
+    if (!snapshot || snapshot.format !== 'travel-frog-save' || ![1, 2, 3, 4].includes(snapshot.version)) {
       throw new Error('unsupported save format');
     }
     const sourceAccount = typeof snapshot.account === 'string' ? { account: snapshot.account } : snapshot.account;
@@ -940,7 +1066,7 @@ class FrogDatabase {
       if (replace) {
         for (const table of ['postcards', 'moments', 'travel_notes', 'stories', 'handbook', 'achievements',
           'encyclopedia_unlocks', 'encyclopedia_show_sub', 'gift_specialties', 'inventory', 'shop_purchases',
-          'clover_plots', 'mails', 'travel_trips', 'travel_events']) {
+          'clover_plots', 'mails', 'travel_trips', 'travel_events', 'visitor_state', 'visitor_acquire']) {
           this.db.prepare(`DELETE FROM ${table} WHERE account = ?`).run(account);
         }
       }
@@ -1095,6 +1221,17 @@ class FrogDatabase {
         insertEvent.run(account, Number(event.id), Number(event.evt_type), Number(event.evt_id || 0),
           stringify(event.evt_value, []), stringify(event.evt_string, []), stringify(event.evt_pic, []), now);
       }
+
+      const visitorSnapshot = snapshot.visitor || {};
+      this.db.prepare(`
+        INSERT OR REPLACE INTO visitor_state(account,visitor_json,next_visit_at,updated_at)
+        VALUES (?,?,?,?)
+      `).run(account, visitorSnapshot.current ? stringify(visitorSnapshot.current, null) : null,
+        Number(visitorSnapshot.next_visit_at || 0), now);
+      const insertAcquire = this.db.prepare(
+        'INSERT OR IGNORE INTO visitor_acquire(account,province,acquired_at) VALUES (?,?,?)',
+      );
+      for (const province of visitorSnapshot.acquire || []) insertAcquire.run(account, String(province), now);
 
       this.seedBasicState(account);
     });

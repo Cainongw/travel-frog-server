@@ -28,6 +28,13 @@ Implemented travel loop:
 - reusable bag equipment is returned after the food is consumed;
 - trips that finish while the client or server is offline settle on the next login.
 
+Implemented visitor flow:
+
+- a native courtyard visitor appears on the first completed synchronization;
+- visitor data uses the client's `visit_load`, `visit_open`, `visit_set_carpet` and `visit_set_expire_time` protocols;
+- opening a first visit records its province, while later visits award the configured ticket gift;
+- visitor state, expiry time and acquired provinces persist in SQLite and exports.
+
 Requires Node.js 22.5 or newer because it uses the built-in `node:sqlite` module.
 
 ## Client setup
@@ -54,7 +61,7 @@ For a MuMu emulator, forward the port before starting the modified client:
 
 The archive is stored at `data/travel-frog.sqlite`. Schema migrations run automatically when the server starts. Stop the server before copying that file as a manual backup. SQLite WAL files are managed automatically.
 
-Every new local account receives the sample postcard, 20 ready clover plants, and one welcome mail containing 500 clover and a food item. Existing accounts receive the welcome mail and clover plots once when upgrading to schema v2.
+Every new local account receives the sample postcard, 20 ready clover plants, one welcome mail containing 500 clover and a food item, and an initial visitor state. Existing accounts receive the welcome mail, clover plots and visitor tables automatically when the schema migrates.
 
 ## Trying a trip
 
@@ -65,6 +72,8 @@ Every new local account receives the sample postcard, 20 ready clover plants, an
 5. On return, open the new postcard mail and save or discard the postcard normally.
 
 The food is consumed. Items in the other bag slots are returned to inventory when the frog comes home. The server rotates through rooftop, seaside, branch, bamboo-forest and wheat-field postcards, and through the three available companions plus solo travel.
+
+After entering the courtyard, a visitor is available on the house scene. Tap the visitor, then accept the visit result. The first visit adds Beijing to the visitor map; the server records that province even if the client is closed immediately afterward. Visitor expiry defaults to 30 minutes and can be changed with `FROG_VISIT_SECONDS`.
 
 ## Archive API
 
@@ -89,7 +98,7 @@ Invoke-RestMethod http://127.0.0.1:8080/api/import `
   -Method Post -ContentType application/json -InFile .\guest370.json
 ```
 
-The export is a versioned JSON document. Version 3 includes inventory, bag/desk equipment, shop purchases, clover plots, all mail records, weather, the current trip and pending client events. It can be inspected or edited before importing. Use a different `account.account` value to import it as a separate local account. Version 1 and 2 exports remain importable.
+The export is a versioned JSON document. Version 4 includes inventory, bag/desk equipment, shop purchases, clover plots, all mail records, weather, the current trip, pending client events and visitor state. It can be inspected or edited before importing. Use a different `account.account` value to import it as a separate local account. Version 1, 2 and 3 exports remain importable.
 
 Read weather for an account:
 
@@ -116,6 +125,7 @@ The following environment variables are optional:
 - `FROG_DB`: SQLite archive path, default `data/travel-frog.sqlite`;
 - `FROG_DATA`: seed postcard JSON path, default `data/postcards.json`.
 - `FROG_TRIP_SECONDS`: trip duration in seconds, default `60` and minimum `1`.
+- `FROG_VISIT_SECONDS`: visitor availability duration in seconds, default `1800` and minimum `60`.
 
 Archive APIs are restricted to loopback clients even when the WebSocket server listens on all interfaces.
 
@@ -145,4 +155,4 @@ The integration test starts isolated servers and temporary SQLite databases. It 
 
 ## Current limits
 
-Travel probabilities, food/tool effects and destination unlock requirements are intentionally simplified. Visitors, furniture crafting, lottery, plants and historical activities are not implemented yet. Ads, payments, social sharing, push, official accounts and anti-addiction services are intentionally out of scope for the local archive server.
+Travel probabilities, food/tool effects and destination unlock requirements are intentionally simplified. Furniture crafting, lottery, plants and historical activities are not implemented yet. Ads, payments, social sharing, push, official accounts and anti-addiction services are intentionally out of scope for the local archive server.

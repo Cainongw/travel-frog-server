@@ -18,6 +18,7 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const DATA_FILE = process.env.FROG_DATA || path.join(__dirname, 'data', 'postcards.json');
 const DB_FILE = process.env.FROG_DB || path.join(__dirname, 'data', 'travel-frog.sqlite');
 const TRIP_SECONDS = Math.max(1, Number(process.env.FROG_TRIP_SECONDS || 60));
+const VISIT_SECONDS = Math.max(60, Number(process.env.FROG_VISIT_SECONDS || 1800));
 
 function loadPictures() {
   const value = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
@@ -135,7 +136,7 @@ function pushInitialState(client) {
   sendEvent(client, 'story_load', { stories: database.getStories(account), new_story_id: 0 });
   sendEvent(client, 'misc_moment_load', { list: database.getMoments(account) });
   sendEvent(client, 'encyclopedia_load', database.getEncyclopedia(account));
-  sendEvent(client, 'visit_load', { visitor: null });
+  sendEvent(client, 'visit_load', database.getVisitorState(account, nowSeconds(), VISIT_SECONDS));
   sendEvent(client, 'furniture_load_furniture', {
     has_fur: [], put_fur: [], replace_fur: [], mate_list: [], bench: [], bench_lock: false, mood: 0,
     shop: { shop_list: [], start_time: 0, leave_time: 0 },
@@ -181,6 +182,7 @@ function pushTravelCompletion(client, result) {
     const event = events.find(item => item.id === eventId);
     if (event) sendEvent(client, 'notify_new_event', { event });
   }
+  sendEvent(client, 'visit_load', database.getVisitorState(client.account, nowSeconds(), VISIT_SECONDS));
 }
 
 function settleConnectedTrips() {
@@ -287,6 +289,19 @@ function commandData(client, request) {
     case 'travel_read_note':
       database.markTravelNotesRead(account, data.id);
       return { code: 0 };
+    case 'visit_load':
+      return database.getVisitorState(account, nowSeconds(), VISIT_SECONDS);
+    case 'visit_set_carpet':
+      database.setVisitorField(account, 'carpet', data.id);
+      return { code: 0 };
+    case 'visit_set_expire_time':
+      database.setVisitorField(account, 'expire_time', data.time);
+      return { code: 0 };
+    case 'visit_open': {
+      const opened = database.openVisitor(account, VISIT_SECONDS);
+      if (opened.ok) sendEvent(client, 'visit_load', { visitor: null, acquire: opened.acquire });
+      return { code: opened.ok ? 0 : 1 };
+    }
     case 'client_confirm_event':
       database.confirmTravelEvent(account, data.id);
       return { code: 0 };
