@@ -68,12 +68,29 @@ function selectTrip(tripNumber) {
 }
 
 function makePostcard(route, companionId, id) {
-  const layers = route.back.map(resourceId => ({ layer: [resourceId, 0, 0] }));
-  layers.push({ layer: route.frog });
+  // The renderer accepts top-left pixels, not Picture.json's centered, y-up
+  // character coordinates. Background placement below is an offline layout;
+  // the original server-only PictureBack configuration is not in this APK.
+  const positions = {
+    1: [0,-13], 2: [-10,0], 5: [40,30], 6: [0,140], 8: [200,126], 7: [-180,122], 11: [-377,269],
+    14: [0,0], 20: [0,150], 18: [0,140], 19: [-85,170], 21: [-187,153],
+    24: [0,0], 25: [0,-39], 588: [0,104], 26: [0,0], 27: [372,0],
+    35: [220,0], 36: [0,212], 37: [270,242], 38: [50,148], 47: [0,116], 48: [346,0],
+    395: [-103,0], 396: [-103,0], 397: [-103,0], 398: [-103,0], 399: [-103,228],
+  };
+  const dimensions = {
+    190:[76,61],245:[90,66],298:[79,70],352:[132,109],199:[68,55],253:[40,62],306:[56,59],360:[81,83],
+    194:[124,89],249:[149,96],302:[131,116],356:[125,166],197:[145,131],251:[74,98],304:[68,85],358:[123,131],
+    200:[83,61],254:[87,54],307:[87,55],361:[94,93],
+  };
+  const background = resourceId => ({ layer: [resourceId, ...(positions[resourceId] || [0,0])] });
+  const character = ([resourceId,x,y]) => ({ layer: [resourceId, Math.round(250+x-dimensions[resourceId][0]/2), Math.round(175-y-dimensions[resourceId][1]/2)] });
+  const layers = route.back.map(background);
+  layers.push(character(route.frog));
   if (companionId >= 0 && route.companions[companionId]) {
-    layers.push({ layer: route.companions[companionId] });
+    layers.push(character(route.companions[companionId]));
   }
-  layers.push(...route.front.map(resourceId => ({ layer: [resourceId, 0, 0] })));
+  layers.push(...route.front.map(background));
   return { id, pic_id: route.picId, layers, for_ads: false, visit: false };
 }
 

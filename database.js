@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
+const { migrateGameplay, getGachaState, importGachaState, grantGachaCredits } = require('./gameplay');
 
 const DEFAULT_SETTINGS = {
   guideStep: 'Complete',
@@ -164,6 +165,7 @@ class FrogDatabase {
     this.ensureColumn('accounts', 'frog_status', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('accounts', 'frog_motion', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('accounts', 'trip_count', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('accounts', 'postcard_sequence', 'INTEGER NOT NULL DEFAULT 0');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS inventory (
@@ -246,9 +248,15 @@ class FrogDatabase {
         PRIMARY KEY (account, province)
       );
 
-      PRAGMA user_version = 4;
+      PRAGMA user_version = 5;
     `);
 
+    this.ensureColumn('visitor_state', 'visit_count', 'INTEGER NOT NULL DEFAULT 0');
+    migrateGameplay(this);
+    this.db.exec(`UPDATE accounts SET postcard_sequence = MAX(postcard_sequence,
+      COALESCE((SELECT MAX(id) FROM postcards WHERE account=accounts.account),0),
+      COALESCE((SELECT MAX(CAST(j.value AS INTEGER)) FROM mails m, json_each(m.pictures_json) j
+        WHERE m.account=accounts.account AND j.type='integer'),0))`);
     for (const row of this.db.prepare('SELECT account FROM accounts').all()) this.seedBasicState(row.account);
   }
 
@@ -260,14 +268,18 @@ class FrogDatabase {
   }
 
   transaction(callback) {
-    this.db.exec('BEGIN IMMEDIATE');
+    const depth = this.transactionDepth || 0;
+    this.transactionDepth = depth + 1;
+    this.db.exec(depth ? `SAVEPOINT frog_${depth}` : 'BEGIN IMMEDIATE');
     try {
       const result = callback();
-      this.db.exec('COMMIT');
+      this.db.exec(depth ? `RELEASE frog_${depth}` : 'COMMIT');
       return result;
     } catch (error) {
-      this.db.exec('ROLLBACK');
+      this.db.exec(depth ? `ROLLBACK TO frog_${depth}; RELEASE frog_${depth}` : 'ROLLBACK');
       throw error;
+    } finally {
+      this.transactionDepth = depth;
     }
   }
 
@@ -401,7 +413,7 @@ class FrogDatabase {
       bag_completed: Boolean(row.bag_completed),
       bag_conflict: false,
       desk_conflict: false,
-      gacha: { color_ball: -1 },
+      gacha: getGachaState(this, row.account),
     };
   }
 
@@ -425,6 +437,7 @@ class FrogDatabase {
   placeItem(value, kind, position, itemId) {
     const account = normalizeAccount(value);
     this.ensureAccount(account);
+    if (kind === 'bag' && this.getTravelState(account)) return { ok: false, conflict: true, changes: [] };
     const column = kind === 'bag' ? 'bag_json' : kind === 'desk' ? 'desk_json' : null;
     if (!column) throw new Error(`invalid equipment kind: ${kind}`);
     const index = Number(position) - 1;
@@ -450,6 +463,7 @@ class FrogDatabase {
   takeItem(value, kind, position) {
     const account = normalizeAccount(value);
     this.ensureAccount(account);
+    if (kind === 'bag' && this.getTravelState(account)) return { ok: false, conflict: true, changes: [] };
     const column = kind === 'bag' ? 'bag_json' : kind === 'desk' ? 'desk_json' : null;
     if (!column) throw new Error(`invalid equipment kind: ${kind}`);
     const index = Number(position) - 1;
@@ -517,7 +531,10 @@ class FrogDatabase {
 
   nextPostcardId(account) {
     const row = this.db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM postcards WHERE account = ?').get(account);
-    return Math.max(1, Number(row.id) + 1);
+    const counter = this.ensureAccount(account).postcard_sequence;
+    const next = Math.max(Number(row.id), Number(counter)) + 1;
+    this.db.prepare('UPDATE accounts SET postcard_sequence=? WHERE account=?').run(next, account);
+    return next;
   }
 
   addPostcard(value, postcard, location = 'new', timestamp = null) {
@@ -623,7 +640,8 @@ class FrogDatabase {
   createVisitor(account, now, durationSeconds) {
     const acquired = this.getVisitorAcquire(account);
     const provinces = ['北京', '上海', '广东', '四川', '浙江', '云南', '海外'];
-    const sequence = this.db.prepare('SELECT COUNT(*) AS count FROM visitor_acquire WHERE account = ?').get(account).count;
+    const sequence = this.db.prepare('SELECT visit_count FROM visitor_state WHERE account = ?').get(account).visit_count;
+    // Visit order must continue even after all province flowers have been collected.
     const province = provinces[Number(sequence) % provinces.length];
     const partner = Number(sequence) % 3;
     const names = ['壁虎', '刺猬', '萤火虫'];
@@ -639,7 +657,7 @@ class FrogDatabase {
       carpet: 0,
     };
     this.db.prepare(`
-      UPDATE visitor_state SET visitor_json = ?, updated_at = ? WHERE account = ?
+      UPDATE visitor_state SET visitor_json = ?, updated_at = ?, visit_count = visit_count + 1 WHERE account = ?
     `).run(JSON.stringify(visitor), now, account);
     return visitor;
   }
@@ -655,12 +673,8 @@ class FrogDatabase {
       row = this.db.prepare('SELECT * FROM visitor_state WHERE account = ?').get(account);
     }
     let visitor = parseJson(row.visitor_json, null);
-    if (visitor && Number(visitor.expire_time) > 0 && Number(visitor.expire_time) <= now) {
-      this.db.prepare('UPDATE visitor_state SET visitor_json = NULL, next_visit_at = ?, updated_at = ? WHERE account = ?')
-        .run(now + Math.max(60, Number(durationSeconds) || 1800), now, account);
-      visitor = null;
-      row = this.db.prepare('SELECT * FROM visitor_state WHERE account = ?').get(account);
-    }
+    // expire_time means departure, after which the client displays a gift.
+    // Keep the visitor until visit_open claims that gift, including across restarts.
     if (!visitor && Number(row.next_visit_at) <= now) visitor = this.createVisitor(account, now, durationSeconds);
     return { visitor, acquire: this.getVisitorAcquire(account) };
   }
@@ -671,8 +685,12 @@ class FrogDatabase {
     const row = this.db.prepare('SELECT visitor_json FROM visitor_state WHERE account = ?').get(account);
     const visitor = parseJson(row && row.visitor_json, null);
     if (!visitor) return false;
+    if (!Number.isSafeInteger(Number(fieldValue))) return false;
     if (field === 'carpet') visitor.carpet = Math.max(1, Math.min(8, Number(fieldValue)));
-    if (field === 'expire_time') visitor.expire_time = Math.max(Math.floor(Date.now() / 1000), Number(fieldValue));
+    if (field === 'expire_time') {
+      if (visitor.expire_time > 0) return true;
+      visitor.expire_time = Math.max(Math.floor(Date.now() / 1000), Math.min(Math.floor(Date.now() / 1000) + 86400, Number(fieldValue)));
+    }
     this.db.prepare('UPDATE visitor_state SET visitor_json = ?, updated_at = ? WHERE account = ?')
       .run(JSON.stringify(visitor), Math.floor(Date.now() / 1000), account);
     return true;
@@ -685,8 +703,8 @@ class FrogDatabase {
     return this.transaction(() => {
       const row = this.db.prepare('SELECT visitor_json FROM visitor_state WHERE account = ?').get(account);
       const visitor = parseJson(row && row.visitor_json, null);
-      if (!visitor || (Number(visitor.expire_time) > 0 && Number(visitor.expire_time) <= now)) {
-        return { ok: false, reason: 'visitor is no longer here' };
+      if (!visitor || Number(visitor.expire_time) <= 0 || Number(visitor.expire_time) > now) {
+        return { ok: false, reason: 'visitor gift is not ready' };
       }
       let reward = { item_id: 0, count: 0 };
       if (visitor.first) {
@@ -848,6 +866,7 @@ class FrogDatabase {
       const row = this.db.prepare('SELECT * FROM mails WHERE account = ? AND id = ? AND opened = 0').get(account, Number(id));
       if (!row) return { ok: false, reason: 'mail not found' };
       const mail = this.rowToMail(row);
+      if (mail.expire > 0 && mail.expire <= Math.floor(Date.now()/1000)) return { ok: false, reason: 'mail expired' };
       this.db.prepare('UPDATE mails SET opened = 1, is_read = 1 WHERE account = ? AND id = ?').run(account, Number(id));
       const role = this.db.prepare('SELECT clover, ticket FROM accounts WHERE account = ?').get(account);
       const clover = Number(role.clover) + Number(mail.resource.clover_point || 0);
@@ -858,6 +877,7 @@ class FrogDatabase {
       for (const item of mail.items) {
         itemChanges.push({ item_id: Number(item.item_id), count: this.changeInventory(account, item.item_id, item.count) });
       }
+      if (mail.resource.reward_gacha > 0) grantGachaCredits(this, account, mail.resource.reward_gacha);
       return { ok: true, mail, clover, ticket, itemChanges };
     });
   }
@@ -1002,11 +1022,11 @@ class FrogDatabase {
     if (!row) throw new Error(`account not found: ${account}`);
     const encyclopedia = this.getEncyclopedia(account);
     const visitorRow = this.db.prepare(
-      'SELECT visitor_json, next_visit_at FROM visitor_state WHERE account = ?',
+      'SELECT visitor_json, next_visit_at, visit_count FROM visitor_state WHERE account = ?',
     ).get(account);
     return {
       format: 'travel-frog-save',
-      version: 4,
+      version: 5,
       exported_at: Math.floor(Date.now() / 1000),
       account: {
         account: row.account,
@@ -1024,6 +1044,7 @@ class FrogDatabase {
         frog_status: Number(row.frog_status || 0),
         frog_motion: Number(row.frog_motion || 0),
         trip_count: Number(row.trip_count || 0),
+        postcard_sequence: Number(row.postcard_sequence || 0),
       },
       postcards: ['album', 'new', 'recycle', 'gift'].flatMap(location =>
         this.getPostcards(account, location).map(postcard => ({ ...postcard, location }))),
@@ -1047,6 +1068,7 @@ class FrogDatabase {
         events: this.getTravelEvents(account),
       },
       visitor: {
+        visit_count: Number(visitorRow?.visit_count || 0),
         current: parseJson(visitorRow && visitorRow.visitor_json, null),
         next_visit_at: Number((visitorRow && visitorRow.next_visit_at) || 0),
         acquire: this.getVisitorAcquire(account),
@@ -1055,7 +1077,7 @@ class FrogDatabase {
   }
 
   importAccount(snapshot, replace = true) {
-    if (!snapshot || snapshot.format !== 'travel-frog-save' || ![1, 2, 3, 4].includes(snapshot.version)) {
+    if (!snapshot || snapshot.format !== 'travel-frog-save' || ![1, 2, 3, 4, 5].includes(snapshot.version)) {
       throw new Error('unsupported save format');
     }
     const sourceAccount = typeof snapshot.account === 'string' ? { account: snapshot.account } : snapshot.account;
@@ -1066,7 +1088,7 @@ class FrogDatabase {
       if (replace) {
         for (const table of ['postcards', 'moments', 'travel_notes', 'stories', 'handbook', 'achievements',
           'encyclopedia_unlocks', 'encyclopedia_show_sub', 'gift_specialties', 'inventory', 'shop_purchases',
-          'clover_plots', 'mails', 'travel_trips', 'travel_events', 'visitor_state', 'visitor_acquire']) {
+          'clover_plots', 'mails', 'travel_trips', 'travel_events', 'visitor_state', 'visitor_acquire', 'gacha_state']) {
           this.db.prepare(`DELETE FROM ${table} WHERE account = ?`).run(account);
         }
       }
@@ -1223,15 +1245,20 @@ class FrogDatabase {
       }
 
       const visitorSnapshot = snapshot.visitor || {};
+      const maxPictureId = (snapshot.postcards || []).reduce((max,p) => Math.max(max,Number(p.id)||0),0);
+      const mailPictureId = (snapshot.mails || []).flatMap(m => m.pictures || []).reduce((max,id)=>Math.max(max,Number(id)||0),0);
+      this.db.prepare('UPDATE accounts SET postcard_sequence=MAX(postcard_sequence,?) WHERE account=?')
+        .run(Math.max(Number(sourceAccount.postcard_sequence || 0),maxPictureId,mailPictureId), account);
       this.db.prepare(`
-        INSERT OR REPLACE INTO visitor_state(account,visitor_json,next_visit_at,updated_at)
-        VALUES (?,?,?,?)
+        INSERT OR REPLACE INTO visitor_state(account,visitor_json,next_visit_at,updated_at,visit_count)
+        VALUES (?,?,?,?,?)
       `).run(account, visitorSnapshot.current ? stringify(visitorSnapshot.current, null) : null,
-        Number(visitorSnapshot.next_visit_at || 0), now);
+        Number(visitorSnapshot.next_visit_at || 0), now, Number(visitorSnapshot.visit_count || 0));
       const insertAcquire = this.db.prepare(
         'INSERT OR IGNORE INTO visitor_acquire(account,province,acquired_at) VALUES (?,?,?)',
       );
       for (const province of visitorSnapshot.acquire || []) insertAcquire.run(account, String(province), now);
+      importGachaState(this, account, snapshot.items?.gacha);
 
       this.seedBasicState(account);
     });

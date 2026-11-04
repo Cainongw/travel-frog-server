@@ -11,3 +11,10 @@
 /data/*.sqlite-wal
 /exports/
 *.log
+**/node_modules/
+/admin-ui/dist/
+/data/*.token
+/data/*.json
+!/data/postcards.json
+/data/backups/
+/.env

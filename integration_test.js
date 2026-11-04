@@ -82,7 +82,7 @@ test('persists archive and basic gameplay state through export and import', asyn
   const port = 20000 + Math.floor(Math.random() * 10000);
   const child = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
     cwd: __dirname,
-    env: { ...process.env, FROG_HOST: '127.0.0.1', FROG_PORT: String(port), FROG_DB: database },
+    env: { ...process.env, FROG_ADMIN_TOKEN: '', FROG_HOST: '127.0.0.1', FROG_PORT: String(port), FROG_DB: database },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   t.after(async () => {
@@ -144,7 +144,7 @@ test('persists archive and basic gameplay state through export and import', asyn
   const exportedResponse = await fetch(`http://127.0.0.1:${port}/api/export?account=archive-test`);
   assert.equal(exportedResponse.status, 200);
   const exported = await exportedResponse.json();
-  assert.equal(exported.version, 4);
+  assert.equal(exported.version, 5);
   assert.equal(exported.account.frog_name, 'Archive Frog');
   assert.deepEqual(exported.moments, [3]);
   assert.equal(exported.postcards[0].location, 'recycle');
@@ -158,6 +158,7 @@ test('persists archive and basic gameplay state through export and import', asyn
   assert.deepEqual(exported.weather, { season: 2, hours_type: 3, weather: 1 });
 
   exported.account = { ...exported.account, account: 'archive-copy', frog_name: 'Imported Frog' };
+  exported.version = 4; // Previous-format snapshots remain importable after schema v5.
   exported.travel_notes = [{ id: 12, read: true, timestamp: 123456 }];
   exported.stories = [{ id: 7, partner: 2, name: 'archive story', gift: -1, feedback: -1 }];
   exported.achievements = [{ id: 5, time: 123000 }];
@@ -201,6 +202,7 @@ test('runs a persistent travel loop and settles native client rewards', async t 
     cwd: __dirname,
     env: {
       ...process.env,
+      FROG_ADMIN_TOKEN: '',
       FROG_HOST: '127.0.0.1',
       FROG_PORT: String(port),
       FROG_DB: database,
@@ -246,7 +248,7 @@ test('runs a persistent travel loop and settles native client rewards', async t 
   await protocol.send('client.confirm_event', { id: goTravel.id });
   await protocol.send('client.confirm_event', { id: backHomeMessage.data.event.id });
   const exported = await (await fetch(`http://127.0.0.1:${port}/api/export?account=trip-test`)).json();
-  assert.equal(exported.version, 4);
+  assert.equal(exported.version, 5);
   assert.equal(exported.account.trip_count, 1);
   assert.equal(exported.account.frog_status, 0);
   assert.equal(exported.travel.current, null);
@@ -270,6 +272,11 @@ test('settles an elapsed trip after the SQLite archive is reopened', t => {
   database.setBagCompleted('offline-test', true);
   const selection = selectTrip(1);
   assert.equal(database.startTravel('offline-test', selection.route, selection.companionId, 60, 100).ok, true);
+  assert.equal(database.takeItem('offline-test', 'bag', 1).ok, false, 'travel food cannot be taken back while away');
+  database.changeInventory('offline-test', 1, 1);
+  assert.equal(database.placeItem('offline-test', 'bag', 1, 1).ok, false, 'travel bag is frozen until return');
+  assert.equal(database.getInventoryCount('offline-test', 1), 1);
+  assert.equal(database.getItemState('offline-test').bag[0], 0);
   database.close();
 
   database = new FrogDatabase(filename, seed);
@@ -289,6 +296,7 @@ test('runs the native visitor visit flow and persists acquired provinces', async
     cwd: __dirname,
     env: {
       ...process.env,
+      FROG_ADMIN_TOKEN: '',
       FROG_HOST: '127.0.0.1',
       FROG_PORT: String(port),
       FROG_DB: database,
@@ -320,6 +328,17 @@ test('runs the native visitor visit flow and persists acquired provinces', async
   assert.deepEqual(initialVisit.acquire, []);
   assert.equal((await protocol.send('visit.set_carpet', { id: 4 })).code, 0);
   assert.equal((await protocol.send('visit.set_expire_time', { time: Math.floor(Date.now() / 1000) + 300 })).code, 0);
+  const beforeDeparture = await (await fetch(`http://127.0.0.1:${port}/api/export?account=visitor-test`)).json();
+  assert.equal(beforeDeparture.visitor.current.carpet, 4);
+  assert.equal(beforeDeparture.visitor.current.expire_time, initialVisit.visitor.expire_time,
+    'the client must not move an already scheduled departure');
+  assert.equal((await protocol.send('visit.open')).code, 1, 'the gift is not ready before departure');
+  beforeDeparture.visitor.current.expire_time = Math.floor(Date.now() / 1000) - 1;
+  const importResult = await fetch(`http://127.0.0.1:${port}/api/import`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(beforeDeparture),
+  });
+  assert.equal(importResult.status, 200);
+  assert.ok((await protocol.send('visit.load')).visitor, 'departed visitor remains until the gift is claimed');
   assert.equal((await protocol.send('visit.open')).code, 0);
   const openedVisit = protocol.events.filter(event => event.cmd === 'visit_load').at(-1).data;
   assert.equal(openedVisit.visitor, null);
@@ -327,7 +346,7 @@ test('runs the native visitor visit flow and persists acquired provinces', async
   assert.equal((await protocol.send('visit.open')).code, 1);
 
   const exported = await (await fetch(`http://127.0.0.1:${port}/api/export?account=visitor-test`)).json();
-  assert.equal(exported.version, 4);
+  assert.equal(exported.version, 5);
   assert.equal(exported.visitor.current, null);
   assert.deepEqual(exported.visitor.acquire, ['北京']);
   assert.ok(exported.visitor.next_visit_at > Math.floor(Date.now() / 1000));

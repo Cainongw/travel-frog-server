@@ -10,6 +10,9 @@ const path = require('path');
 const { FrogDatabase, normalizeAccount } = require('./database');
 const { SHOP_ITEMS } = require('./game_data');
 const { TRAVEL_ROUTES, selectTrip, makePostcard } = require('./travel_data');
+const { loadCatalog, resourceImage } = require('./catalog');
+const { AdminService } = require('./admin');
+const { GameplayService } = require('./gameplay');
 
 const HOST = process.env.FROG_HOST || '0.0.0.0';
 const PORT = Number(process.env.FROG_PORT || 8080);
@@ -34,6 +37,32 @@ function loadPictures() {
 const pictures = loadPictures();
 const database = new FrogDatabase(DB_FILE, pictures);
 const clients = new Set();
+const catalog = loadCatalog();
+const admin = new AdminService(database, catalog);
+const gameplay = new GameplayService(database, catalog);
+const ADMIN_TOKEN = process.env.FROG_ADMIN_TOKEN || '';
+if (ADMIN_TOKEN && ADMIN_TOKEN.length < 24) throw Error('FROG_ADMIN_TOKEN must be at least 24 characters');
+const UI_ROOT = path.join(__dirname, 'admin-ui', 'dist');
+
+function hasAdminToken(req) {
+  const received = Buffer.from(req.headers.authorization || '');
+  const expected = Buffer.from(`Bearer ${ADMIN_TOKEN}`);
+  return ADMIN_TOKEN && received.length === expected.length && crypto.timingSafeEqual(received, expected);
+}
+
+function pushAdminResult(result) {
+  if (result.replayed) return;
+  for (const client of clients) {
+    if (!client.synced || client.account !== result.account || client.socket.destroyed) continue;
+    const account = client.account;
+    if (result.mail) sendEvent(client, 'notify_new_mail', { mail: result.mail });
+    if (result.picture) sendEvent(client, 'album_load_new', { pictures: database.getPostcards(account, 'new'), visted_pic: [], has_ads: false, is_share: false });
+    if (result.action === 'role') sendEvent(client, 'client_load_role', database.getRole(account));
+    if (result.action === 'notes') sendEvent(client, 'travel_load_note', { note_list: database.getTravelNotes(account) });
+    if (result.action === 'visitor-depart') sendEvent(client, 'visit_load', database.getVisitorState(account));
+    if (result.action === 'import' || result.action === 'weather') sendEvent(client, 'client_notice', { msg: '存档或季节已更新，请重新进入游戏加载。' });
+  }
+}
 
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
@@ -188,7 +217,7 @@ function pushTravelCompletion(client, result) {
 function settleConnectedTrips() {
   const accounts = new Map();
   for (const client of clients) {
-    if (client.authed && !client.socket.destroyed) {
+    if (client.synced && !client.socket.destroyed) {
       if (!accounts.has(client.account)) accounts.set(client.account, []);
       accounts.get(client.account).push(client);
     }
@@ -299,7 +328,12 @@ function commandData(client, request) {
       return { code: 0 };
     case 'visit_open': {
       const opened = database.openVisitor(account, VISIT_SECONDS);
-      if (opened.ok) sendEvent(client, 'visit_load', { visitor: null, acquire: opened.acquire });
+      if (opened.ok) {
+        const role = database.getRole(account);
+        pushRoleResources(client, { clover: role.res.clover_point, ticket: role.res.ticket,
+          itemChanges: opened.reward.item_id > 0 && opened.reward.item_id < 100000 ? [{ item_id: opened.reward.item_id, count: database.getInventoryCount(account, opened.reward.item_id) }] : [] });
+        sendEvent(client, 'visit_load', { visitor: null, acquire: opened.acquire });
+      }
       return { code: opened.ok ? 0 : 1 };
     }
     case 'client_confirm_event':
@@ -333,13 +367,29 @@ function commandData(client, request) {
       return { code: 0 };
     case 'mail_open': {
       const reward = database.openMail(account, data.id);
-      if (reward.ok) pushRoleResources(client, reward);
+      if (reward.ok) {
+        pushRoleResources(client, reward);
+        if (reward.mail.pictures.length) sendEvent(client, 'album_load_new', {
+          pictures: database.getPostcards(account, 'new'), visted_pic: [], has_ads: false, is_share: false,
+        });
+      }
       return { code: reward.ok ? 0 : 1 };
     }
     case 'item_load_items':
       return database.getItemState(account);
     case 'item_load_shop_info':
       return { purchased: database.getShopPurchases(account) };
+    case 'item_gacha': {
+      const result = gameplay.draw(account, data.is_reward ?? false);
+      sendEvent(client, 'item_update_ticket', { ticket: result.ticket_balance });
+      if (!result.ok) sendEvent(client, 'client_notice', { msg: result.reason });
+      return { code: result.ok ? 0 : 1, ticket: result.rank };
+    }
+    case 'item_redeem_prize': {
+      const result = gameplay.redeem(account, data.prize_id);
+      pushRoleResources(client, { ticket: result.ticket_balance, itemChanges: result.itemChanges });
+      return { code: result.ok ? 0 : 1 };
+    }
     case 'item_buy': {
       const shopItem = SHOP_ITEMS.get(Number(data.shop_id));
       if (!shopItem) return false;
@@ -372,6 +422,7 @@ function commandData(client, request) {
       return { code: result.ok ? 0 : 1, conflict: result.conflict };
     }
     case 'item_set_bag_completed': {
+      if (database.getTravelState(account)) return { code: 0 };
       database.setBagCompleted(account, data.completed);
       if (data.completed) {
         const selection = selectTrip(database.getTripCount(account) + 1);
@@ -420,6 +471,7 @@ function handleMessage(client, text) {
       // Push state before acknowledging the synchronization request so the
       // client has season/role data before it starts loading scene resources.
       pushInitialState(client);
+      client.synced = true;
       sendResponse(client, request, response);
       return;
     }
@@ -432,7 +484,7 @@ function handleMessage(client, text) {
 
 function sendHttpJson(res, status, value, headers = {}) {
   const body = JSON.stringify(value, null, 2);
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers });
   res.end(body);
 }
 
@@ -463,14 +515,56 @@ function readJsonBody(req) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname === '/health') {
-    sendHttpJson(res, 200, { ok: true, database: DB_FILE, accounts: database.getAccounts().length });
+    sendHttpJson(res, 200, { ok: true, version: require('./package.json').version });
     return;
   }
-  if (url.pathname.startsWith('/api/') && !isLoopback(req.socket.remoteAddress)) {
-    sendHttpJson(res, 403, { error: 'archive API is only available from localhost' });
-    return;
+  if (url.pathname.startsWith('/api/')) {
+    if (url.pathname.startsWith('/api/admin/') && !ADMIN_TOKEN) {
+      sendHttpJson(res, 503, { error: '请设置 FROG_ADMIN_TOKEN（至少 24 字符）后重启服务器' }); return;
+    }
+    if (ADMIN_TOKEN ? !hasAdminToken(req) : !isLoopback(req.socket.remoteAddress) || !!req.headers.origin) {
+      sendHttpJson(res, 401, { error: 'Invalid or missing management token' }); return;
+    }
   }
   try {
+    if (url.pathname.startsWith('/api/admin/')) {
+      const route = url.pathname.slice('/api/admin/'.length);
+      const account = url.searchParams.get('account');
+      if (req.method === 'GET') {
+        if (route === 'status') {
+          sendHttpJson(res, 200, { version: require('./package.json').version, schema: database.db.prepare('PRAGMA user_version').get().user_version,
+            accounts: database.getAccounts().length, online: [...clients].filter(x => x.synced).length, catalog: catalog.available }); return;
+        }
+        if (route === 'accounts') {
+          sendHttpJson(res, 200, { accounts: database.getAccounts().map(x => ({ ...x, online: [...clients].some(c => c.synced && c.account === x.account) })) }); return;
+        }
+        if (route === 'catalog') {
+          sendHttpJson(res, 200, { available: catalog.available, items: catalog.items.map(({id,name,type}) => ({id,name,type})),
+            pictures: catalog.pictures.map(({id,name}) => ({id,name})), notes: catalog.notes.map(({id,type})=>({id,type})), resources: catalog.resources,
+            templates: TRAVEL_ROUTES.map(x => ({ id: x.id, name: x.destination, picture: makePostcard(x, -1, 0),
+              variants: [-1,0,1,2].map(companion_id => ({ companion_id, picture: makePostcard(x, companion_id, 0) })) })) }); return;
+        }
+        if (/^image\/\d+$/.test(route)) {
+          const bytes = resourceImage(catalog, Number(route.split('/')[1]));
+          res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'private, max-age=3600', 'x-content-type-options': 'nosniff' }); res.end(bytes); return;
+        }
+        admin.requireAccount(account);
+        if (route === 'account' || route === 'export') { sendHttpJson(res, 200, database.exportAccount(account)); return; }
+        if (route === 'audit') { sendHttpJson(res, 200, { operations: admin.audit(account), backups: admin.backups(account) }); return; }
+        if (route === 'backup') {
+          const backup = database.db.prepare('SELECT save_json FROM admin_backups WHERE id=? AND account=?').get(Number(url.searchParams.get('id')), account);
+          if (!backup) throw Error('Backup not found');
+          sendHttpJson(res, 200, JSON.parse(backup.save_json)); return;
+        }
+      }
+      if (req.method === 'POST') {
+        if (!(req.headers['content-type'] || '').startsWith('application/json')) throw Error('Expected application/json');
+        const result = admin.mutate(account, route, await readJsonBody(req), req.headers['idempotency-key']);
+        pushAdminResult(result);
+        sendHttpJson(res, 200, result); return;
+      }
+      sendHttpJson(res, 404, { error: 'Unknown management route' }); return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/accounts') {
       sendHttpJson(res, 200, { accounts: database.getAccounts() });
       return;
@@ -483,6 +577,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/import') {
+      if (ADMIN_TOKEN) { sendHttpJson(res, 409, { error: 'Use audited /api/admin/import when administration is enabled' }); return; }
       const body = await readJsonBody(req);
       const snapshot = body.save || body;
       const imported = database.importAccount(snapshot, body.replace !== false);
@@ -496,6 +591,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'POST') {
+        if (ADMIN_TOKEN) { sendHttpJson(res, 409, { error: 'Use audited /api/admin/weather' }); return; }
         sendHttpJson(res, 200, database.setWeather(account, await readJsonBody(req)));
         return;
       }
@@ -504,11 +600,24 @@ const server = http.createServer(async (req, res) => {
     sendHttpJson(res, 400, { error: error.message });
     return;
   }
+  if (req.method === 'GET' && (url.pathname === '/admin' || url.pathname.startsWith('/admin/'))) {
+    const relative = url.pathname.replace(/^\/admin\/?/, '') || 'index.html';
+    const filename = path.resolve(UI_ROOT, relative);
+    if (!filename.startsWith(UI_ROOT + path.sep) || !fs.existsSync(filename) || !fs.statSync(filename).isFile()) {
+      sendHttpJson(res, 404, { error: 'Build the management UI with npm run admin:build' }); return;
+    }
+    const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
+    res.writeHead(200, { 'content-type': types[path.extname(filename)] || 'application/octet-stream', 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY' });
+    fs.createReadStream(filename).pipe(res); return;
+  }
   res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
   res.end('travel frog private server\nhealth: /health\narchive API: /api/accounts, /api/export, /api/import, /api/weather\n');
 });
 
 server.on('upgrade', (req, socket) => {
+  if (!isLoopback(req.socket.remoteAddress) && process.env.FROG_ALLOW_REMOTE_GAME !== '1') {
+    socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); return;
+  }
   const key = req.headers['sec-websocket-key'];
   if (!key) return socket.destroy();
   const accept = crypto.createHash('sha1').update(key + WS_GUID).digest('base64');
@@ -547,6 +656,7 @@ travelTimer.unref();
 
 function shutdown() {
   clearInterval(travelTimer);
+  for (const client of clients) client.socket.destroy();
   server.close(() => {
     database.close();
     process.exit(0);

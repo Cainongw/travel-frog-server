@@ -1,6 +1,43 @@
 # Travel Frog local archive server
 
-This dependency-free Node.js server provides a local login and SQLite-backed personal archive for the China edition of Travel Frog.
+This Node.js server provides a local login and SQLite-backed personal archive for the China edition of Travel Frog. The server uses Node built-ins; the optional Svelte 5 management UI is built with Vite.
+
+## Svelte 管理台（v0.6）
+
+在 `private_server` 目录运行（完整构建建议 Node.js 22.12+）：
+
+```powershell
+npm run admin:install
+npm run admin:build
+npm run start:admin
+```
+
+打开 `http://127.0.0.1:8080/admin/`。首次启动会在 `data/admin.token` 生成随机管理密钥；在本机读取后粘贴到登录框：
+
+```powershell
+Get-Content .\data\admin.token
+```
+
+密钥文件、SQLite 和构建产物均不提交到 Git。网页只在内存中保存密钥，刷新后需重新输入。
+
+管理台支持账号搜索/创建、在线状态、角色名/草/券修改、天气、笔记解锁、访客离场、明信片预览和下发、奖励邮件、相册与库存查看、JSON 导入导出、审计记录与导入前自动备份下载。导入替换前必须确认目标账号；替换前的快照和操作记录与业务修改在同一 SQLite 事务内提交。发送请求带幂等编号，网络失败重试不会重复发奖。
+
+默认从相邻目录 `../旅行青蛙·中国之旅/assets/game/resource/China/` 读取 `eab/config.eab` 和 `images/Picture/`。也可以设置 `FROG_ASSETS` 指向这份目录。素材不会复制进仓库；缺少素材时管理台仍可管理档案，但明信片校验/预览、物品目录和抽奖不可用。
+
+明信片可以使用 5 个模板及 4 种同行组合，也可编辑 APK 已有资源的图层 JSON。预览使用与客户端一致的 500×350、左上角坐标绘制。模板背景布局是本地近似，并非复原的官方生成算法。发送后保存到待收相册并生成 `type=11` 邮件；在线客户端实时收到推送，离线客户端下次同步领取。打开邮件会推送完整待收相册，可能连续展示多张未保存明信片。外部图片上传尚未实现。
+
+### 远程访问
+
+```powershell
+$env:FROG_HOST = '0.0.0.0'
+npm run start:admin
+```
+
+其他设备访问 `http://服务器局域网IP:8080/admin/`，输入同一管理密钥。新管理接口和旧 `/api/*` 接口都会校验 Bearer 密钥；旧写入接口在管理模式下关闭，统一走有审计的新接口。不要把密钥放在 URL。跨不可信网络应使用 HTTPS 反向代理或 SSH 隧道。
+
+游戏 WebSocket 默认只接受回环地址，ADB reverse 仍可用。管理密钥只保护管理接口，不是官方账号认证。如果要让可信局域网里的游戏客户端直接连接，显式设置 `FROG_ALLOW_REMOTE_GAME=1`；TestChannel 使用本地账号标识，不应将这个入口直接公开到互联网。
+
+开发管理台：先运行后端，再 `npm run admin:dev`；Vite 将 `/api` 代理到本机 8080。管理台与后端生产部署使用同源地址。
 
 Implemented archive features:
 
@@ -32,8 +69,18 @@ Implemented visitor flow:
 
 - a native courtyard visitor appears on the first completed synchronization;
 - visitor data uses the client's `visit_load`, `visit_open`, `visit_set_carpet` and `visit_set_expire_time` protocols;
-- opening a first visit records its province, while later visits award the configured ticket gift;
+- after departure, claiming a first visit's gift records its province; repeat provinces award tickets;
 - visitor state, expiry time and acquired provinces persist in SQLite and exports.
+
+Implemented native raffle:
+
+- five tickets per draw, six colors using the weights found in the APK;
+- pending color survives restart and must be redeemed before a new draw;
+- prize selection is checked against that color; white balls return a ticket;
+- duplicate redemption without a pending draw cannot award again;
+- rewarded draws require server-issued credits, not just a client flag.
+
+Protocol evidence and remaining limitations are documented in [docs/gameplay-protocol.md](docs/gameplay-protocol.md) and [docs/implementation-status.md](docs/implementation-status.md).
 
 Requires Node.js 22.5 or newer because it uses the built-in `node:sqlite` module.
 
@@ -73,11 +120,11 @@ Every new local account receives the sample postcard, 20 ready clover plants, on
 
 The food is consumed. Items in the other bag slots are returned to inventory when the frog comes home. The server rotates through rooftop, seaside, branch, bamboo-forest and wheat-field postcards, and through the three available companions plus solo travel.
 
-After entering the courtyard, a visitor is available on the house scene. Tap the visitor, then accept the visit result. The first visit adds Beijing to the visitor map; the server records that province even if the client is closed immediately afterward. Visitor expiry defaults to 30 minutes and can be changed with `FROG_VISIT_SECONDS`.
+After entering the courtyard, a visitor is available on the house scene. Wait for departure, then tap the gift left in the courtyard. The first visit adds Beijing to the visitor map. Departure defaults to 30 minutes (`FROG_VISIT_SECONDS`); the unclaimed gift remains after departure and server restarts. The management UI can advance the departure for testing.
 
 ## Archive API
 
-Management endpoints accept localhost connections only.
+Without a management token, the legacy endpoints below accept localhost non-browser requests only. With `FROG_ADMIN_TOKEN` configured, all API requests require `Authorization: Bearer <token>` and writes use the audited `/api/admin/*` endpoints. The Svelte UI handles this automatically.
 
 List accounts:
 
@@ -98,7 +145,7 @@ Invoke-RestMethod http://127.0.0.1:8080/api/import `
   -Method Post -ContentType application/json -InFile .\guest370.json
 ```
 
-The export is a versioned JSON document. Version 4 includes inventory, bag/desk equipment, shop purchases, clover plots, all mail records, weather, the current trip, pending client events and visitor state. It can be inspected or edited before importing. Use a different `account.account` value to import it as a separate local account. Version 1, 2 and 3 exports remain importable.
+The export is a versioned JSON document. Version 5 adds persistent raffle state, a monotonically increasing postcard ID and visitor rotation count. Version 1–4 exports remain importable. Management imports validate the target account and catalog references, and save a recoverable pre-import snapshot. These files are local-server saves; they do not extract an original official account from a phone.
 
 Read weather for an account:
 
@@ -126,8 +173,11 @@ The following environment variables are optional:
 - `FROG_DATA`: seed postcard JSON path, default `data/postcards.json`.
 - `FROG_TRIP_SECONDS`: trip duration in seconds, default `60` and minimum `1`.
 - `FROG_VISIT_SECONDS`: visitor availability duration in seconds, default `1800` and minimum `60`.
+- `FROG_ADMIN_TOKEN`: management Bearer token, at least 24 characters; `start:admin` generates one when omitted;
+- `FROG_ASSETS`: extracted APK `resource/China` directory;
+- `FROG_ALLOW_REMOTE_GAME`: set to `1` to allow non-loopback TestChannel WebSockets.
 
-Archive APIs are restricted to loopback clients even when the WebSocket server listens on all interfaces.
+The authenticated management API supports remote access. The game and management entry points use separate access checks.
 
 ## Seed postcard
 
@@ -151,8 +201,8 @@ Run the integration test:
 npm test
 ```
 
-The integration test starts isolated servers and temporary SQLite databases. It covers login, initial synchronization, album/recycle behavior, mail rewards, shopping, inventory, bag placement, clover harvesting, weather, versioned export/import, and a complete one-second travel cycle.
+Tests use isolated servers and temporary SQLite databases. They cover gameplay, offline/restart settlement, visitor gifts, raffle rewards, management authentication, online/offline postcard delivery, validation, idempotency, auditing and restore backups. Management API tests generate their own minimal EAB/PNG fixtures; real APK checks skip explicitly when the local assets are absent. UI transport tests: `npm --prefix admin-ui test`; production build: `npm run admin:build`.
 
 ## Current limits
 
-Travel probabilities, food/tool effects and destination unlock requirements are intentionally simplified. Furniture crafting, lottery, plants and historical activities are not implemented yet. Ads, payments, social sharing, push, official accounts and anti-addiction services are intentionally out of scope for the local archive server.
+Travel probabilities, food/tool effects and destination unlock requirements are intentionally simplified. Furniture crafting, plants, historical activities and the separate `lottery_*` activity are not implemented yet (the native `item_gacha` raffle is implemented). Ads, payments, social sharing, push, official accounts and anti-addiction services remain out of scope for the local archive server.
