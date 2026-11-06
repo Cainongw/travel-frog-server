@@ -28,11 +28,17 @@ function createAssets(directory) {
     }
   }
   const entries = {
-    Item_json: [0, 1000, 2000, 3000].map(id => ({ id, name: `Test item ${id}`, type: id === 3000 ? 3 : 0 })),
+    Item_json: [...[0, 1000, 2000, 3000].map(id => ({ id, name: `Test item ${id}`, type: id === 3000 ? 3 : 0 })),
+      ...[[10001,10],[10101,11],[10201,12],[10301,13]].map(([id,type])=>({id,type,name:`Craft ${id}`}))],
     Picture_json: TRAVEL_ROUTES.map(x => ({ id: x.picId, name: x.destination })),
     Note_json: { 1000: { id: 1000, type: 1 }, 1001: { id: 1001, type: 1 } },
     resources_json: resources,
     Prize_json: [{ id: 0, itemId: -1, rank: 0, stock: 1 }],
+    furnitureData_json: {1001:{id:1001,name:'Default wall',style:1,type:1,drawing:10301},1101:{id:1101,name:'Stone wall',style:2,type:1,drawing:10301}},
+    furnitureShopData_json: {1:{id:1,item_id:10001,price:2,limit:0,shop_limit:1,has_item:0}},
+    benchData_json: [{id:1101,type:1}],
+    Character_json: {data:[0,1,2].map(id=>({id,name:`Neighbor ${id}`,taste:[99]}))},
+    Specialty_json: [{id:0,itemId:3000}],
   };
   const payloads = Object.entries(entries).map(([name, value]) => ({ name, bytes: Buffer.from(JSON.stringify(value)) }));
   const metadata = Buffer.from(JSON.stringify(payloads.map(x => ({ n: x.name, t: 'json', s: x.bytes.length }))));
@@ -156,7 +162,7 @@ test('authenticated remote administration delivers and preserves game state', as
     assert.deepEqual((await get('accounts')).accounts, []);
     const status = await get('status');
     assert.equal(status.accounts, 0);
-    assert.equal(status.schema, 5);
+    assert.equal(status.schema, 6);
     assert.equal((await api('account?account=missing')).status, 400);
     assert.deepEqual((await get('accounts')).accounts, [], 'read must not create unknown accounts');
     assert.equal((await fetch(`${base}/api/import`, { method: 'POST', headers: { authorization: `Bearer ${TOKEN}` } })).status, 409);
@@ -173,7 +179,7 @@ test('authenticated remote administration delivers and preserves game state', as
     assert.equal((await get('accounts')).accounts[0].online, false);
     await post(account, 'create', {}, randomUUID(), 400);
     const snapshot = await get(`account?account=${account}`);
-    assert.equal(snapshot.version, 5);
+    assert.equal(snapshot.version, 6);
     assert.equal(snapshot.account.account, account);
     assert.equal(snapshot.travel.current, null);
     assert.equal(snapshot.visitor.current, null, 'management reads do not generate visitors');
@@ -379,6 +385,63 @@ test('local APK catalog is decoded when available', t => {
   assert.equal(catalog.resources[190], 'Picture/Normal/roof1_qw');
 });
 
+test('garden workbench, construction, placement and neighbor rewards use native protocol', async t => {
+  const {get,post,connect}=await startServer(t), account='garden-frog';
+  await post(account,'create',{});
+  const original=await get(`export?account=${account}`);
+  assert.equal(original.furniture,null);
+  const garden=await get(`garden?account=${account}`);
+  assert.deepEqual(garden.furniture.has_fur,[1001]);
+  assert.equal((await get(`export?account=${account}`)).furniture,null,'garden GET must not initialize records');
+  const client=await connect(account);
+  assert.equal(client.events.find(x=>x.cmd==='furniture_load_furniture').data.bench.length,10);
+  const parcel=await post(account,'mail',{title:'Workshop supplies',clover:10,items:[10201,10301,10101,10001,3000].map(item_id=>({item_id,count:1}))});
+  await client.send('mail.open',{id:parcel.mail.id});
+  assert.equal((await client.send('furniture.putin_bench',{pos:1,id:10101})).code,1);
+  assert.equal((await client.send('furniture.putin_bench',{pos:1,id:10201})).code,0);
+  assert.equal((await client.send('furniture.putin_bench',{pos:6,id:10101})).code,0);
+  await client.send('client.hello');
+  assert.equal(client.events.filter(x=>x.cmd==='furniture_load_furniture').at(-1).data.bench[5],10101);
+  await post(account,'furniture-advance',{});
+  assert.equal((await get(`garden?account=${account}`)).furniture.job.furniture_id,1101);
+  assert.equal((await client.send('furniture.takeout_bench',{pos:6})).code,1,'locked workbench');
+  const crafting=await get(`export?account=${account}`);
+  const restored=await post(account,'import',{save:crafting});
+  assert.ok(restored.backup_id);
+  const finishKey=randomUUID();
+  const finished=await post(account,'furniture-finish',{},finishKey);
+  assert.equal(finished.completed,1101);
+  assert.equal((await post(account,'furniture-finish',{},finishKey)).replayed,true);
+  assert.equal((await client.send('furniture.replace_fur',{id:99999})).code,-1);
+  assert.equal((await client.send('furniture.replace_fur',{id:1101})).code,1);
+  await client.send('client.hello');
+  const placed=await get(`garden?account=${account}`);
+  assert.deepEqual(placed.furniture.put_fur,[{type:1,id:1101}]);
+  assert.equal(placed.inventory.find(x=>x.item_id===10201).count,1,'reusable tool remains owned');
+  assert.ok(!placed.inventory.some(x=>x.item_id===10001),'raw material spent');
+  assert.equal((await client.send('furniture.buy_shop',{shop_id:1})).code,0);
+  assert.equal((await client.send('furniture.buy_shop',{shop_id:1})).code,1,'per-visit shop limit');
+  await post(account,'visitor-depart',{});
+  const arrival=await post(account,'neighbor-arrive',{});
+  const guest=arrival.guest;
+  assert.equal(guest.id,0);
+  assert.equal((await client.send('guest.confirm',{id:guest.id})).code,0);
+  assert.equal((await client.send('guest.serve',{id:guest.id,item_id:3000})).code,0);
+  assert.equal((await client.send('guest.serve',{id:guest.id,item_id:3000})).code,1,'no repeat feeding');
+  const departure=await post(account,'neighbor-depart',{});
+  assert.equal(departure.mail.type,3);
+  assert.equal(departure.mail.resource.clover_point,80);
+  const before=await get(`export?account=${account}`);
+  await client.send('mail.open',{id:departure.mail.id});
+  assert.equal((await client.send('mail.open',{id:departure.mail.id})).code,1);
+  const after=await get(`export?account=${account}`);
+  assert.equal(after.account.clover,before.account.clover+80);
+  assert.equal(after.account.ticket,before.account.ticket+1);
+  assert.equal(after.neighbors.id,-1);
+  assert.ok(client.events.some(x=>x.cmd==='notify_new_mail'&&x.data.mail.id===departure.mail.id));
+  assert.ok(client.events.some(x=>x.cmd==='notify_new_event'&&x.data.event.evt_type===21));
+});
+
 test('schema upgrade and old snapshot import preserve postcard IDs referenced only by mail', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'frog-postcard-sequence-'));
   const filename = path.join(directory, 'archive.sqlite');
@@ -391,7 +454,7 @@ test('schema upgrade and old snapshot import preserve postcard IDs referenced on
   database.db.exec('ALTER TABLE accounts DROP COLUMN postcard_sequence; PRAGMA user_version=4;');
   database.close();
   database = new FrogDatabase(filename);
-  assert.equal(database.db.prepare('PRAGMA user_version').get().user_version, 5);
+  assert.equal(database.db.prepare('PRAGMA user_version').get().user_version, 6);
   assert.equal(database.nextPostcardId('legacy-mail'), 90002);
 
   const olderSave = database.exportAccount('legacy-mail');

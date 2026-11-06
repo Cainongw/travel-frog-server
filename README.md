@@ -2,7 +2,7 @@
 
 This Node.js server provides a local login and SQLite-backed personal archive for the China edition of Travel Frog. The server uses Node built-ins; the optional Svelte 5 management UI is built with Vite.
 
-## Svelte 管理台（v0.6）
+## Svelte 管理台（v0.7）
 
 在 `private_server` 目录运行（完整构建建议 Node.js 22.12+）：
 
@@ -22,6 +22,17 @@ Get-Content .\data\admin.token
 
 管理台支持账号搜索/创建、在线状态、角色名/草/券修改、天气、笔记解锁、访客离场、明信片预览和下发、奖励邮件、相册与库存查看、JSON 导入导出、审计记录与导入前自动备份下载。导入替换前必须确认目标账号；替换前的快照和操作记录与业务修改在同一 SQLite 事务内提交。发送请求带幂等编号，网络失败重试不会重复发奖。
 
+新增“庭院与制造”：查看家具目录及材料需求、补寄缺少的图纸/材料/一种可用工具、操作 10 槽工作台、查询或提前完成制作、摆放已有家具、向家具商人购买物品、安排邻居来访/离场。庭院查询不会创建访客或启动制作。图纸与工具可复用，特殊材料移入工作台后从库存移出，开工后工作台锁定。
+
+### 家具和邻居怎么用
+
+1. 在“庭院与制造”选择家具，点击“寄出制造补给”，再在游戏里领取邮件。
+2. 工作台 1–5 槽放任意一种家具工具，6–10 槽放对应特殊材料；松木和图纸留在仓库。
+3. 青蛙在家且条件满足时，在线定时推进会自动开工；也可在管理台“检查制造进度”。默认 60 秒，到期后加入拥有列表，再选择摆放。服务器停机不重置已开始任务的期限，下次游戏同步补结算。
+4. 乌龟/猫头鹰/松鼠是 `guest.*` 邻居，独立于 `visit.*` 省份串门。客户端点击邻居用特产招待；离场后回礼进入邮箱，领取才增加余额。省份访客在场时暂不生成邻居。
+
+当前支持 218 个离线制作配方、68 个家具商店条目和 27 件初始家具。APK 没有提供完整的服务端配方、耗时和回礼概率；本项目采用明示的离线规则，并非官方算法复原。规则及静态证据见 [家具协议](docs/furniture-protocol.md)、[邻居协议](docs/neighbors-protocol.md)、[REA 分析记录](docs/rea-evidence.md)。
+
 默认从相邻目录 `../旅行青蛙·中国之旅/assets/game/resource/China/` 读取 `eab/config.eab` 和 `images/Picture/`。也可以设置 `FROG_ASSETS` 指向这份目录。素材不会复制进仓库；缺少素材时管理台仍可管理档案，但明信片校验/预览、物品目录和抽奖不可用。
 
 明信片可以使用 5 个模板及 4 种同行组合，也可编辑 APK 已有资源的图层 JSON。预览使用与客户端一致的 500×350、左上角坐标绘制。模板背景布局是本地近似，并非复原的官方生成算法。发送后保存到待收相册并生成 `type=11` 邮件；在线客户端实时收到推送，离线客户端下次同步领取。打开邮件会推送完整待收相册，可能连续展示多张未保存明信片。外部图片上传尚未实现。
@@ -38,6 +49,15 @@ npm run start:admin
 游戏 WebSocket 默认只接受回环地址，ADB reverse 仍可用。管理密钥只保护管理接口，不是官方账号认证。如果要让可信局域网里的游戏客户端直接连接，显式设置 `FROG_ALLOW_REMOTE_GAME=1`；TestChannel 使用本地账号标识，不应将这个入口直接公开到互联网。
 
 开发管理台：先运行后端，再 `npm run admin:dev`；Vite 将 `/api` 代理到本机 8080。管理台与后端生产部署使用同源地址。
+
+如果 Windows 在启动时返回 `listen EACCES ...:8080`，可先用 `netsh interface ipv4 show excludedportrange protocol=tcp` 检查系统保留范围，然后改用可用端口：
+
+```powershell
+$env:FROG_PORT = '18080'
+npm run start:admin
+```
+
+此时管理台地址为 `http://127.0.0.1:18080/admin/`。游戏仍连接设备上的 8080 时，ADB 映射需改为 `adb reverse tcp:8080 tcp:18080`，无需再次修改 APK。
 
 Implemented archive features:
 
@@ -145,7 +165,7 @@ Invoke-RestMethod http://127.0.0.1:8080/api/import `
   -Method Post -ContentType application/json -InFile .\guest370.json
 ```
 
-The export is a versioned JSON document. Version 5 adds persistent raffle state, a monotonically increasing postcard ID and visitor rotation count. Version 1–4 exports remain importable. Management imports validate the target account and catalog references, and save a recoverable pre-import snapshot. These files are local-server saves; they do not extract an original official account from a phone.
+The export is a versioned JSON document. Version 6 includes furniture ownership/placement, workbench jobs and neighbor visits, in addition to raffle state and postcard ID sequences. Version 1–5 exports remain importable. Management imports validate the target account and catalog references, and save a recoverable pre-import snapshot. These files are local-server saves; they do not extract an original official account from a phone.
 
 Read weather for an account:
 
@@ -173,6 +193,9 @@ The following environment variables are optional:
 - `FROG_DATA`: seed postcard JSON path, default `data/postcards.json`.
 - `FROG_TRIP_SECONDS`: trip duration in seconds, default `60` and minimum `1`.
 - `FROG_VISIT_SECONDS`: visitor availability duration in seconds, default `1800` and minimum `60`.
+- `FROG_CRAFT_SECONDS`: local furniture crafting duration, default `60`;
+- `FROG_NEIGHBOR_SECONDS`: neighbor stay duration, default `1800`;
+- `FROG_NEIGHBOR_COOLDOWN`: interval after a neighbor leaves, default `21600`;
 - `FROG_ADMIN_TOKEN`: management Bearer token, at least 24 characters; `start:admin` generates one when omitted;
 - `FROG_ASSETS`: extracted APK `resource/China` directory;
 - `FROG_ALLOW_REMOTE_GAME`: set to `1` to allow non-loopback TestChannel WebSockets.
@@ -201,8 +224,8 @@ Run the integration test:
 npm test
 ```
 
-Tests use isolated servers and temporary SQLite databases. They cover gameplay, offline/restart settlement, visitor gifts, raffle rewards, management authentication, online/offline postcard delivery, validation, idempotency, auditing and restore backups. Management API tests generate their own minimal EAB/PNG fixtures; real APK checks skip explicitly when the local assets are absent. UI transport tests: `npm --prefix admin-ui test`; production build: `npm run admin:build`.
+Tests use isolated servers and temporary SQLite databases. They cover gameplay, offline/restart settlement, furniture crafting and placement, neighbor feeding/reward mail, visitor gifts, raffle rewards, management authentication, online/offline postcard delivery, validation, idempotency, auditing and restore backups. Management API tests generate their own minimal EAB/PNG fixtures; real APK checks skip explicitly when the local assets are absent. UI tests: `npm --prefix admin-ui test`; production build: `npm run admin:build`. Browser verification used a separate test account/database for workbench placement, starting/completing a job, placing the finished furniture and arranging a neighbor. These checks do not substitute for Android-client visual verification.
 
 ## Current limits
 
-Travel probabilities, food/tool effects and destination unlock requirements are intentionally simplified. Furniture crafting, plants, historical activities and the separate `lottery_*` activity are not implemented yet (the native `item_gacha` raffle is implemented). Ads, payments, social sharing, push, official accounts and anti-addiction services remain out of scope for the local archive server.
+Travel probabilities, food/tool effects, destination unlock requirements, furniture recipes and neighbor rewards are intentionally simplified. Plants, courtyard specialty objects (tumbler/compost/pocket/flowerpot), story gift progression, historical activities and the separate `lottery_*` activity are not implemented yet (the native `item_gacha` raffle is implemented). Ads, payments, social sharing, push, official accounts and anti-addiction services remain out of scope for the local archive server.

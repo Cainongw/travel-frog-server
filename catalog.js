@@ -45,7 +45,7 @@ function readBundle(filename) {
 
 function loadCatalog(root = process.env.FROG_ASSETS || path.join(__dirname, '..', '旅行青蛙·中国之旅', 'assets', 'game', 'resource', 'China')) {
   const filename = path.join(root, 'eab', 'config.eab');
-  if (!fs.existsSync(filename)) return { available: false, items: [], pictures: [], notes: [], resources: {}, root };
+  if (!fs.existsSync(filename)) return { available: false, items: [], pictures: [], notes: [], resources: {}, furniture: [], furnitureShop: [], bench: [], neighbors: [], specialties: [], root };
   const config = readBundle(filename);
   return {
     available: true, root,
@@ -54,6 +54,11 @@ function loadCatalog(root = process.env.FROG_ASSETS || path.join(__dirname, '..'
     notes: Object.values(config.Note_json || {}),
     resources: config.resources_json || {},
     prizes: Object.values(config.Prize_json || {}),
+    furniture: Object.values(config.furnitureData_json || {}),
+    furnitureShop: Object.values(config.furnitureShopData_json || {}),
+    bench: Object.values(config.benchData_json || {}),
+    neighbors: config.Character_json?.data || [],
+    specialties: Object.values(config.Specialty_json || {}),
   };
 }
 

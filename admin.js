@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const { TRAVEL_ROUTES, makePostcard } = require('./travel_data');
+const { validateFurnitureState } = require('./furniture');
 
 function integer(value, name, min = 0, max = 999999) {
   if (!Number.isSafeInteger(value) || value < min || value > max) throw Error(`${name}: expected integer ${min}..${max}`);
@@ -13,9 +14,10 @@ function string(value, name, max = 200) {
 }
 
 class AdminService {
-  constructor(database, catalog) {
+  constructor(database, catalog, services = {}) {
     this.db = database;
     this.catalog = catalog;
+    this.services = services;
     database.db.exec(`
       CREATE TABLE IF NOT EXISTS admin_operations (
         id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT UNIQUE NOT NULL,
@@ -77,6 +79,31 @@ class AdminService {
       if (action !== 'create') this.requireAccount(account);
       let result = {};
       switch (action) {
+        case 'furniture-put':
+        case 'furniture-take':
+        case 'furniture-buy':
+        case 'furniture-replace':
+        case 'furniture-advance':
+        case 'furniture-finish': {
+          const service=this.services.furniture;
+          if (!service) throw Error('Furniture service unavailable');
+          result=action==='furniture-put'?service.put(account,body.pos,body.id)
+            :action==='furniture-take'?service.take(account,body.pos)
+            :action==='furniture-buy'?service.buy(account,body.shop_id)
+            :action==='furniture-replace'?service.replace(account,body.id)
+            :action==='furniture-finish'?service.finish(account):service.advance(account);
+          if (!result.ok) throw Error(result.reason || 'Furniture operation failed');
+          break;
+        }
+        case 'neighbor-arrive':
+        case 'neighbor-depart': {
+          const service=this.services.neighbors;
+          if (!service) throw Error('Neighbor service unavailable');
+          result=action==='neighbor-arrive'?service.forceArrive(account):service.forceDepart(account);
+          if (!result.ok) throw Error(result.reason || 'Neighbor operation failed');
+          if (result.changed) result.event=this.db.enqueueEvent(account,6);
+          break;
+        }
         case 'create': {
           string(account, 'account', 128);
           if (account !== account.trim()) throw Error('Account cannot contain leading or trailing whitespace');
@@ -141,7 +168,8 @@ class AdminService {
   }
 
   validateSave(save) {
-    if (save.format !== 'travel-frog-save' || ![1,2,3,4,5].includes(save.version)) throw Error('Unsupported save format');
+    if (save.format !== 'travel-frog-save' || ![1,2,3,4,5,6].includes(save.version)) throw Error('Unsupported save format');
+    validateFurnitureState(save.furniture,this.catalog);
     const role = save.account;
     for (const key of ['clover','ticket','trip_count','created_at','icon','postcard_sequence']) {
       if (role[key] !== undefined) integer(role[key], key, 0, Number.MAX_SAFE_INTEGER);

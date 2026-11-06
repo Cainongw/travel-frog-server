@@ -1,6 +1,7 @@
 <script>
   import { api, setToken, downloadJson } from './api.js';
   import Postcard from './Postcard.svelte';
+  import Garden from './Garden.svelte';
 
   let secret = '';
   let connected = false;
@@ -13,6 +14,7 @@
   let accounts = [];
   let selected = '';
   let snapshot = null;
+  let garden = null;
   let activity = { operations: [], backups: [] };
   let search = '';
   let newAccount = '';
@@ -52,11 +54,12 @@
     { id: 'overview', label: '蛙居概览', mark: '01' },
     { id: 'postcards', label: '明信片邮局', mark: '02' },
     { id: 'mail', label: '礼物与邮件', mark: '03' },
-    { id: 'archive', label: '存档管理', mark: '04' },
-    { id: 'activity', label: '操作记录', mark: '05' },
+    { id: 'garden', label: '庭院与制造', mark: '04' },
+    { id: 'archive', label: '存档管理', mark: '05' },
+    { id: 'activity', label: '操作记录', mark: '06' },
   ];
   const companions = [{ id: -1, name: '独自旅行' }, { id: 0, name: '壁虎同行' }, { id: 1, name: '刺猬同行' }, { id: 2, name: '萤火虫同行' }];
-  const actionNames = { create: '创建账号', postcards: '下发明信片', mail: '寄送奖励邮件', role: '修改角色', weather: '设置天气', notes: '解锁笔记', import: '导入存档', 'visitor-depart': '访客离场' };
+  const actionNames = { create: '创建账号', postcards: '下发明信片', mail: '寄送奖励邮件', role: '修改角色', weather: '设置天气', notes: '解锁笔记', import: '导入存档', 'visitor-depart': '访客离场', 'furniture-put': '放入工作台', 'furniture-take': '取出工作台物品', 'furniture-buy': '购买家具商品', 'furniture-replace': '摆放家具', 'furniture-advance': '检查制造进度', 'furniture-finish': '立即完成制造', 'neighbor-arrive': '邻居来访', 'neighbor-depart': '邻居离场' };
   const locations = { album: '已保存', new: '待收取', recycle: '回收站', gift: '礼品盒' };
   const date = value => value ? new Date(value * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
   const number = value => Number(value || 0).toLocaleString('zh-CN');
@@ -92,18 +95,20 @@
     finally { busy = false; }
   }
   function logout() {
-    requestVersion++; connected = false; setToken(''); snapshot = null; selected = ''; accounts = [];
+    requestVersion++; connected = false; setToken(''); snapshot = null; garden = null; selected = ''; accounts = [];
     catalog = { items: [], templates: [], notes: [], pictures: [], resources: {} };
     importSave = null; importName = ''; importConfirm = ''; importAcknowledged = false; clearMessages();
   }
-  async function loadAccount(account) {
+  async function loadAccount(account, keepVisible = false) {
     const version = ++requestVersion;
-    selected = account; loadingAccount = true; snapshot = null; previewAlbum = null;
+    const preserve = keepVisible && account === selected && snapshot;
+    selected = account; loadingAccount = !preserve;
+    if (!preserve) { snapshot = null; garden = null; previewAlbum = null; }
     importSave = null; importName = ''; importConfirm = ''; importAcknowledged = false;
     try {
-      const [save, log] = await Promise.all([api('account', account), api('audit', account)]);
+      const [save, log, courtyard] = await Promise.all([api('account', account), api('audit', account), api('garden', account)]);
       if (version !== requestVersion) return;
-      snapshot = save; activity = log;
+      snapshot = save; activity = log; garden = courtyard;
       frogName = save.account.frog_name; clover = save.account.clover; ticket = save.account.ticket;
       season = save.weather.season; hours = save.weather.hours_type; weather = save.weather.weather || 1;
     } catch (e) { if (version === requestVersion) error = e.message; }
@@ -124,7 +129,7 @@
       const result = await api(action, account, { body });
       notice = `${message}${result.replayed ? '（此操作已处理，未重复执行）' : ''}`;
       const list = await api('accounts'); accounts = list.accounts;
-      await loadAccount(account);
+      await loadAccount(account, true);
       return result;
     } catch (e) { error = e.message; return null; }
     finally { busy = false; }
@@ -171,7 +176,7 @@
     try {
       if (file.size > 10 * 1024 * 1024) throw Error('存档不能大于 10 MiB。');
       const data = JSON.parse(await file.text());
-      if (data.format !== 'travel-frog-save' || ![1, 2, 3, 4].includes(data.version)) throw Error('请选择支持的 travel-frog-save JSON 存档。');
+      if (data.format !== 'travel-frog-save' || ![1, 2, 3, 4, 5, 6].includes(data.version)) throw Error('请选择支持的 travel-frog-save JSON 存档。');
       if (data.account?.account !== selected) throw Error('存档账号与当前所选账号不同，请先选择对应账号。');
       importSave = data; importName = file.name;
     } catch (e) { error = e.message; }
@@ -238,6 +243,8 @@
             <section class="panel"><div class="panel-heading"><h2>旅行笔记</h2><span>JOURNAL</span></div><p class="muted">从客户端原生笔记中解锁一篇，保留它的图文内容。</p><form onsubmit={event => { event.preventDefault(); mutate('notes', { id: Number(noteId) }, '笔记已解锁。'); }}><label>笔记编号<select bind:value={noteId} disabled={!catalog.notes.length}>{#each catalog.notes as note}<option value={note.id}>#{note.id} · 类型 {note.type}{snapshot.travel_notes.some(x => x.id === note.id) ? ' · 已解锁' : ''}</option>{/each}</select></label><button class="secondary" disabled={busy || !catalog.notes.length}>解锁笔记</button></form></section>
             <section class="panel"><div class="panel-heading"><h2>庭院来客</h2><span>VISITOR</span></div>{#if snapshot.visitor?.current}<h3>{snapshot.visitor.current.name} · {snapshot.visitor.current.city.split('_')[0]}</h3><p class="muted">离场时间：{date(snapshot.visitor.current.expire_time)}</p><p class="muted">让访客提前离场后，可在客户端领取留下的礼物。</p><button class="secondary" onclick={() => mutate('visitor-depart', {}, '访客已离场，客户端可领取礼物。')} disabled={busy}>让访客离场</button>{:else}<p class="muted">当前没有访客。客户端同步时会按来访计时生成。</p>{/if}<div class="province-list">{#each snapshot.visitor?.acquire || [] as province}<span class="tag">{province}</span>{/each}</div></section>
           </div>
+        {:else if tab === 'garden'}
+          <Garden {catalog} {snapshot} {garden} {busy} onAction={mutate} />
         {:else if tab === 'postcards'}
           <div class="section-intro"><div><p class="eyebrow">SEND A LITTLE WONDER</p><h2>把远方，寄到蛙的邮箱。</h2></div><p>明信片将进入待收取相册。<br />在线推送，离线留存。</p></div>
           <div class="postcard-layout"><section class="postcard-preview"><div class="paper-frame"><Postcard picture={shownPicture} /><div class="postcard-caption"><span>{custom ? '自定义明信片' : template?.name || '未选择'}</span><small>TRAVEL FROG / {shownPicture?.pic_id || '—'}</small></div></div><div class="preview-meta"><span>500 × 350 · 原生图层合成</span><span>{shownPicture?.layers?.length || 0} 个图层</span></div>{#if !custom && companion !== -1 && !template?.variants}<p class="notice warning">服务器暂未提供同行者预览，当前仅显示独行版；实际下发会包含所选同行者。</p>{/if}</section>

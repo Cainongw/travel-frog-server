@@ -4,6 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const { migrateGameplay, getGachaState, importGachaState, grantGachaCredits } = require('./gameplay');
+const { migrateFurniture, exportFurnitureState, importFurnitureState } = require('./furniture');
+const { migrateNeighbors, getNeighborState, importNeighborState } = require('./neighbors');
 
 const DEFAULT_SETTINGS = {
   guideStep: 'Complete',
@@ -248,11 +250,13 @@ class FrogDatabase {
         PRIMARY KEY (account, province)
       );
 
-      PRAGMA user_version = 5;
+      PRAGMA user_version = 6;
     `);
 
     this.ensureColumn('visitor_state', 'visit_count', 'INTEGER NOT NULL DEFAULT 0');
     migrateGameplay(this);
+    migrateFurniture(this);
+    migrateNeighbors(this);
     this.db.exec(`UPDATE accounts SET postcard_sequence = MAX(postcard_sequence,
       COALESCE((SELECT MAX(id) FROM postcards WHERE account=accounts.account),0),
       COALESCE((SELECT MAX(CAST(j.value AS INTEGER)) FROM mails m, json_each(m.pictures_json) j
@@ -506,6 +510,16 @@ class FrogDatabase {
   confirmTravelEvent(value, eventId) {
     return this.db.prepare('DELETE FROM travel_events WHERE account = ? AND event_id = ?')
       .run(normalizeAccount(value), Number(eventId)).changes > 0;
+  }
+
+  enqueueEvent(value, type, id = 0, values = [], strings = []) {
+    const account = normalizeAccount(value), now = Math.floor(Date.now()/1000);
+    this.ensureAccount(account);
+    const eventId = Math.max(now*1000, Number(this.db.prepare('SELECT COALESCE(MAX(event_id),0)+1 AS id FROM travel_events WHERE account=?').get(account).id));
+    const event = {id:eventId,evt_type:type,evt_id:id,evt_value:values,evt_string:strings,evt_pic:[]};
+    this.db.prepare('INSERT INTO travel_events(account,event_id,evt_type,evt_id,evt_value_json,evt_string_json,evt_pic_json,created_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(account,eventId,type,id,JSON.stringify(values),JSON.stringify(strings),'[]',now);
+    return event;
   }
 
   getTravelState(value) {
@@ -1026,7 +1040,7 @@ class FrogDatabase {
     ).get(account);
     return {
       format: 'travel-frog-save',
-      version: 5,
+      version: 6,
       exported_at: Math.floor(Date.now() / 1000),
       account: {
         account: row.account,
@@ -1073,11 +1087,13 @@ class FrogDatabase {
         next_visit_at: Number((visitorRow && visitorRow.next_visit_at) || 0),
         acquire: this.getVisitorAcquire(account),
       },
+      furniture: exportFurnitureState(this, account),
+      neighbors: getNeighborState(this, account),
     };
   }
 
   importAccount(snapshot, replace = true) {
-    if (!snapshot || snapshot.format !== 'travel-frog-save' || ![1, 2, 3, 4, 5].includes(snapshot.version)) {
+    if (!snapshot || snapshot.format !== 'travel-frog-save' || ![1, 2, 3, 4, 5, 6].includes(snapshot.version)) {
       throw new Error('unsupported save format');
     }
     const sourceAccount = typeof snapshot.account === 'string' ? { account: snapshot.account } : snapshot.account;
@@ -1088,7 +1104,7 @@ class FrogDatabase {
       if (replace) {
         for (const table of ['postcards', 'moments', 'travel_notes', 'stories', 'handbook', 'achievements',
           'encyclopedia_unlocks', 'encyclopedia_show_sub', 'gift_specialties', 'inventory', 'shop_purchases',
-          'clover_plots', 'mails', 'travel_trips', 'travel_events', 'visitor_state', 'visitor_acquire', 'gacha_state']) {
+          'clover_plots', 'mails', 'travel_trips', 'travel_events', 'visitor_state', 'visitor_acquire', 'gacha_state', 'furniture_state', 'neighbor_state']) {
           this.db.prepare(`DELETE FROM ${table} WHERE account = ?`).run(account);
         }
       }
@@ -1259,6 +1275,8 @@ class FrogDatabase {
       );
       for (const province of visitorSnapshot.acquire || []) insertAcquire.run(account, String(province), now);
       importGachaState(this, account, snapshot.items?.gacha);
+      importFurnitureState(this, account, snapshot.furniture);
+      importNeighborState(this, account, snapshot.neighbors);
 
       this.seedBasicState(account);
     });

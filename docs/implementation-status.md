@@ -1,6 +1,6 @@
 # 实现范围与后续工作
 
-本文以当前 `server.js`、`database.js`、`gameplay.js`、`admin.js`、`catalog.js` 和 `admin-ui/src` 为准。项目版本为 0.6.0，SQLite schema 与 JSON 导出格式为 v5，仍接受 v1–v4 导入。它是基于客户端协议实现的本地服务器；客户端能打开某个页面、收到 `{code:0}`，并不证明对应玩法已经实现。
+本文以当前 `server.js`、`database.js`、`gameplay.js`、`furniture.js`、`neighbors.js`、`admin.js`、`catalog.js` 和 `admin-ui/src` 为准。项目版本为 0.7.0，SQLite schema 与 JSON 导出格式为 v6，仍接受 v1–v5 导入。它是基于客户端协议实现的本地服务器；客户端能打开某个页面、收到 `{code:0}`，并不证明对应玩法已经实现。
 
 APK 配置包含图片、物品、笔记和奖项定义，不能据此恢复玩家的官方账号进度。管理台管理的是当前服务器的 SQLite 数据；将真实存档迁入仍需先取得真实数据，再转换成相应记录。
 
@@ -17,6 +17,8 @@ APK 配置包含图片、物品、笔记和奖项定义，不能据此恢复玩�
 | 最小旅行循环 | `item.set_bag_completed`、`client.confirm_event` 和相关推送 | 背包食物就绪即出发、定时归来、离线后补结算，生成图片/笔记/特产，并保存未确认事件。默认 60 秒，轮换五条路线；未恢复真实旅行路线算法。 |
 | 串门访客 | `visit.load`、`visit.set_carpet`、`visit.set_expire_time`、`visit.open` | 访客停留、离开后礼物领取、初次省份花朵收集、复访券奖励；循环七个省份。领取和计时状态跨重启保存。此功能不是乌龟/猫头鹰/松鼠的 `guest.*` 邻居喂食玩法。 |
 | 原生抽奖 | `item.gacha`、`item.redeem_prize` | 扣 5 券、六色抽奖、选择同色奖项、白球返券、待兑奖状态跨重启恢复。配置来自 APK，免费抽奖必须有服务器已记账的奖励次数。详见 [gameplay-protocol.md](gameplay-protocol.md)。 |
+| 家具 | `furniture.load_furniture`、`furniture.putin_bench`、`furniture.takeout_bench`、`furniture.buy_shop`、`furniture.replace_fur` | 十槽工作台、材料消费、可复用工具和图纸、自动定时制作、离线补结算、拥有和摆放、商店价格与购买限制。218 个可制作家具采用本地近似配方，非官方完整算法；不倒翁等独立物件未实现。 |
+| 邻居 | `guest.load`、`guest.confirm`、`guest.serve`、`guest.set_expire_time`、`guest.finish` | 三种邻居轮换、按 APK 特产喜好喂食、离场回礼邮件、一次性消费及领取、重启持久化；到访和奖励数额使用明示本地规则。 |
 | 笔记、故事和图鉴存储 | `travel.load_note`、`travel.read_note`、`story.load`、`item.load_handbook`、`misc.moment_*`、`encyclopedia.*` | 支持现有记录读取、部分标记/解锁，以及存档导入导出。故事赠礼、故事反馈和完整自然解锁链尚未实现。 |
 | 天气 | `weather.load` 与管理接口 | 季节、时段、天气持久化；后台修改后通知重新进入游戏，加载对应场景资源。并非自动气候模拟。 |
 
@@ -46,6 +48,8 @@ APK 的 `MainOutView.updateVisitorGift()` 在 `expire_time <= serverTime` 时显
 
 已接入账号选择/创建、在线状态、账号数据查看，模板与图层 JSON 明信片预览/下发，草/券/道具奖励邮件，角色姓名/余额调整，天气修改，旅行笔记解锁，访客离场，JSON 导入导出、操作记录与覆盖前备份下载。
 
+v0.7 新增庭院页：工作台物品放入/取出、配方缺额补给邮件、制作任务查询/提前完成、已有家具摆放、商店购买、邻居到访与离场。`GET /api/admin/garden` 只读；各写操作有审计和幂等键。原生商店和工作台回包后的客户端还有本地修改，因此服务器先回复 session，再推完整状态。邻居在线变化在 `guest_load` 后推 `client_load_role`，触发庭院重绘。详细证据见 [furniture-protocol.md](furniture-protocol.md)、[neighbors-protocol.md](neighbors-protocol.md)；REA 的部分静态分析边界见 [rea-evidence.md](rea-evidence.md)。
+
 - 管理接口使用至少 24 字符的 `FROG_ADMIN_TOKEN` Bearer 密钥。未配置时管理接口返回 503；配置后旧 `/api/*` 接口也要求密钥，旧导入/天气写接口引导使用有审计的管理接口。
 - 管理写请求使用 `Idempotency-Key`。同一编号和相同操作重试返回原结果，不重复发图片、邮件或奖励；编号被用于不同操作时拒绝。前端对未明确成功的网络重试复用编号。
 - 明信片 ID、资源 ID、图层坐标、物品 ID 和部分存档字段对照配置校验。APK 资源缺失时不能凭空生成目录内容；配置不存在的图片和奖项不会伪装为已支持。
@@ -68,9 +72,7 @@ HTTP 管理可远程使用 Bearer 密钥。游戏 WebSocket 默认只接受 loop
 
 下列功能不能标为完成：
 
-- `guest.*` 邻居来访、特产喂食、喜好和回礼；与 `visit.*` 省份串门独立。
 - `story.send_gift`、`story.feedback_gift` 等故事发展、赠礼与反馈循环；当前 `story.load` 只读取已有故事。
-- 家具制造、工作台、图纸和素材转换、家具摆放；`furniture_load_*` 的空数据只是让页面获得结构。
 - 花盆、种植、堆肥、不倒翁和其他庭院物件的完整制作/收益循环。
 - `pray.*` 手作、烹饪任务、绘画聚会、博物馆探索、许愿池、答题、节日活动与历史活动状态机。
 - 所有称号/图鉴/明信片的官方解锁条件，食品/护身符/工具的实际旅行效果。
@@ -81,9 +83,9 @@ HTTP 管理可远程使用 Bearer 密钥。游戏 WebSocket 默认只接受 loop
 ## 下一步与验证边界
 
 1. 用真实客户端核验新图片邮件、多张待收图片、访客离场礼物以及抽奖动画；协议测试不能替代原客户端的画面和交互验证。
-2. 优先实现 `guest.*` 邻居喂食和 `story.*` 赠礼反馈，复用现有库存、邮件和事务结算，验证重复提交不重复扣除/发奖。
-3. 再按工作台与制造完成协议恢复家具/手作，补充制作耗时、离线结算、材料归属、摆放限制和相应管理界面。
+2. 核验家具页、制作锁定/完成提示与原生邻居互动，再实现 `story.*` 赠礼反馈循环。
+3. 按独立协议继续恢复手作和花盆等物件，不用已完成的普通家具状态冒充这些玩法。
 4. 扩展旅行配置，逐项验证物品消耗性、背包/桌面类别限制、目的地和构图规则；不要以固定轮换模板充当官方完整旅行算法。
 5. 为目前默认成功的命令建立支持清单与诊断记录，保证后续页面测试能辨认“占位”与“已结算”。
 
-`npm test` 包含存档/基本玩法、管理接口、抽奖存储和抽奖 WebSocket 测试；管理 API 测试覆盖鉴权、幂等下发、在线通知、离线交付、导入备份、访客奖励等。`npm run admin:build` 验证 Svelte 编译。测试通过只能证明其覆盖的行为，不能证明上面列出的未实现玩法或全部原客户端页面已经正常运行。
+`npm test` 包含存档/基本玩法、管理接口、抽奖、家具和邻居测试；管理 API 测试包含原生工作台/摆放/喂食 WebSocket 往返、鉴权、幂等下发、在线通知、离线交付、导入备份、奖励结算等。`npm run admin:build` 验证 Svelte 编译；前端测试核验网络重试及材料缺额计算。隔离账号的浏览器操作已走通家具制作/摆放与邻居来访。测试通过只能证明其覆盖的行为，不能证明上面列出的未实现玩法或全部原客户端页面已经正常运行。

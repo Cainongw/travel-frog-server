@@ -144,7 +144,7 @@ test('persists archive and basic gameplay state through export and import', asyn
   const exportedResponse = await fetch(`http://127.0.0.1:${port}/api/export?account=archive-test`);
   assert.equal(exportedResponse.status, 200);
   const exported = await exportedResponse.json();
-  assert.equal(exported.version, 5);
+  assert.equal(exported.version, 6);
   assert.equal(exported.account.frog_name, 'Archive Frog');
   assert.deepEqual(exported.moments, [3]);
   assert.equal(exported.postcards[0].location, 'recycle');
@@ -248,7 +248,7 @@ test('runs a persistent travel loop and settles native client rewards', async t 
   await protocol.send('client.confirm_event', { id: goTravel.id });
   await protocol.send('client.confirm_event', { id: backHomeMessage.data.event.id });
   const exported = await (await fetch(`http://127.0.0.1:${port}/api/export?account=trip-test`)).json();
-  assert.equal(exported.version, 5);
+  assert.equal(exported.version, 6);
   assert.equal(exported.account.trip_count, 1);
   assert.equal(exported.account.frog_status, 0);
   assert.equal(exported.travel.current, null);
@@ -346,7 +346,7 @@ test('runs the native visitor visit flow and persists acquired provinces', async
   assert.equal((await protocol.send('visit.open')).code, 1);
 
   const exported = await (await fetch(`http://127.0.0.1:${port}/api/export?account=visitor-test`)).json();
-  assert.equal(exported.version, 5);
+  assert.equal(exported.version, 6);
   assert.equal(exported.visitor.current, null);
   assert.deepEqual(exported.visitor.acquire, ['北京']);
   assert.ok(exported.visitor.next_visit_at > Math.floor(Date.now() / 1000));

@@ -13,6 +13,8 @@ const { TRAVEL_ROUTES, selectTrip, makePostcard } = require('./travel_data');
 const { loadCatalog, resourceImage } = require('./catalog');
 const { AdminService } = require('./admin');
 const { GameplayService } = require('./gameplay');
+const { FurnitureService } = require('./furniture');
+const { NeighborService, guestProtocol } = require('./neighbors');
 
 const HOST = process.env.FROG_HOST || '0.0.0.0';
 const PORT = Number(process.env.FROG_PORT || 8080);
@@ -38,8 +40,10 @@ const pictures = loadPictures();
 const database = new FrogDatabase(DB_FILE, pictures);
 const clients = new Set();
 const catalog = loadCatalog();
-const admin = new AdminService(database, catalog);
 const gameplay = new GameplayService(database, catalog);
+const furniture = new FurnitureService(database, catalog, {craftSeconds:Number(process.env.FROG_CRAFT_SECONDS || 60)});
+const neighbors = new NeighborService(database, catalog, {durationSeconds:Number(process.env.FROG_NEIGHBOR_SECONDS || 1800),cooldownSeconds:Number(process.env.FROG_NEIGHBOR_COOLDOWN || 21600)});
+const admin = new AdminService(database, catalog, { furniture, neighbors });
 const ADMIN_TOKEN = process.env.FROG_ADMIN_TOKEN || '';
 if (ADMIN_TOKEN && ADMIN_TOKEN.length < 24) throw Error('FROG_ADMIN_TOKEN must be at least 24 characters');
 const UI_ROOT = path.join(__dirname, 'admin-ui', 'dist');
@@ -56,6 +60,8 @@ function pushAdminResult(result) {
     if (!client.synced || client.account !== result.account || client.socket.destroyed) continue;
     const account = client.account;
     if (result.mail) sendEvent(client, 'notify_new_mail', { mail: result.mail });
+    if (result.action.startsWith('furniture-')) pushFurnitureState(client, result);
+    if (result.action.startsWith('neighbor-')) pushNeighborState(client, {...result,mail:null});
     if (result.picture) sendEvent(client, 'album_load_new', { pictures: database.getPostcards(account, 'new'), visted_pic: [], has_ads: false, is_share: false });
     if (result.action === 'role') sendEvent(client, 'client_load_role', database.getRole(account));
     if (result.action === 'notes') sendEvent(client, 'travel_load_note', { note_list: database.getTravelNotes(account) });
@@ -146,6 +152,9 @@ function sendEvent(client, cmd, data) {
 function pushInitialState(client) {
   const account = client.account;
   database.advanceTravel(account, TRAVEL_ROUTES, makePostcard);
+  furniture.advance(account);
+  database.getVisitorState(account, nowSeconds(), VISIT_SECONDS);
+  neighbors.sync(account);
   sendEvent(client, 'weather_load', database.getWeather(account));
   sendEvent(client, 'client_load_events', database.getTravelEvents(account));
   sendEvent(client, 'client_load_role', database.getRole(account));
@@ -166,10 +175,8 @@ function pushInitialState(client) {
   sendEvent(client, 'misc_moment_load', { list: database.getMoments(account) });
   sendEvent(client, 'encyclopedia_load', database.getEncyclopedia(account));
   sendEvent(client, 'visit_load', database.getVisitorState(account, nowSeconds(), VISIT_SECONDS));
-  sendEvent(client, 'furniture_load_furniture', {
-    has_fur: [], put_fur: [], replace_fur: [], mate_list: [], bench: [], bench_lock: false, mood: 0,
-    shop: { shop_list: [], start_time: 0, leave_time: 0 },
-  });
+  sendEvent(client, 'furniture_load_furniture', furniture.getState(account));
+  sendEvent(client, 'guest_load', guestProtocol(neighbors.state(account)));
   sendEvent(client, 'furniture_load_tumbler', { show_index: 0, replace_index: 0, tumbler_list: [] });
   sendEvent(client, 'furniture_load_compost', {
     show_index: 0, replace_index: 0, compost_list: [], state: 0, box_index: 0, box_list: [],
@@ -193,6 +200,33 @@ function pushRoleResources(client, state) {
   if (state.clover != null) sendEvent(client, 'clover_update', { clover: state.clover });
   if (state.ticket != null) sendEvent(client, 'item_update_ticket', { ticket: state.ticket });
   pushItemChanges(client, state.itemChanges || (state.item ? [state.item] : []));
+}
+
+function pushFurnitureState(client, result) {
+  pushRoleResources(client, result);
+  sendEvent(client, 'furniture_load_furniture', furniture.getState(client.account));
+  if (result.event) sendEvent(client, 'notify_new_event', {event:result.event});
+}
+
+function pushNeighborState(client, result) {
+  pushItemChanges(client, result.itemChanges);
+  sendEvent(client, 'guest_load', result.guest || guestProtocol(neighbors.state(client.account)));
+  // guest_load only assigns data; RoleEventType.loadRole resets the courtyard.
+  sendEvent(client, 'client_load_role', database.getRole(client.account));
+  if (result.mail) sendEvent(client, 'notify_new_mail', {mail:result.mail});
+  if (result.event) sendEvent(client, 'notify_new_event', {event:result.event});
+}
+
+function neighborAction(account, callback) {
+  return database.transaction(()=>{
+    const result=callback();
+    if (result.changed) result.event=database.enqueueEvent(account,6);
+    return result;
+  });
+}
+
+function afterGameReply(client, callback) {
+  (client.afterResponse ||= []).push(callback);
 }
 
 function pushTravelCompletion(client, result) {
@@ -225,6 +259,10 @@ function settleConnectedTrips() {
   for (const [account, accountClients] of accounts) {
     const result = database.advanceTravel(account, TRAVEL_ROUTES, makePostcard);
     if (result) for (const client of accountClients) pushTravelCompletion(client, result);
+    const made = furniture.advance(account);
+    if (made.changed) for (const client of accountClients) pushFurnitureState(client,made);
+    const neighbor = neighborAction(account,()=>neighbors.sync(account));
+    if (neighbor.changed) for (const client of accountClients) pushNeighborState(client,neighbor);
   }
 }
 
@@ -232,6 +270,30 @@ function commandData(client, request) {
   const data = request.data || {};
   const account = client.account;
   switch (request.cmd) {
+    case 'furniture_load_furniture':
+      return furniture.getState(account);
+    case 'furniture_putin_bench':
+    case 'furniture_takeout_bench':
+    case 'furniture_buy_shop':
+    case 'furniture_replace_fur': {
+      const result = request.cmd === 'furniture_putin_bench' ? furniture.put(account,data.pos,data.id)
+        : request.cmd === 'furniture_takeout_bench' ? furniture.take(account,data.pos)
+        : request.cmd === 'furniture_buy_shop' ? furniture.buy(account,data.shop_id) : furniture.replace(account,data.id);
+      afterGameReply(client,()=>pushFurnitureState(client,result));
+      return {code:result.code};
+    }
+    case 'guest_load':
+      return guestProtocol(neighbors.state(account));
+    case 'guest_confirm':
+    case 'guest_serve':
+    case 'guest_set_expire_time':
+    case 'guest_finish': {
+      const result = neighborAction(account,()=>request.cmd==='guest_confirm' ? neighbors.confirm(account,data.id)
+        : request.cmd==='guest_serve' ? neighbors.serve(account,data.id,data.item_id)
+        : request.cmd==='guest_set_expire_time' ? neighbors.setExpire(account,data.time) : neighbors.finish(account));
+      afterGameReply(client,()=>pushNeighborState(client,result));
+      return {code:result.ok?0:1};
+    }
     case 'client_hello':
       return { timestamp: nowSeconds() };
     case 'hall_gen_token':
@@ -476,7 +538,10 @@ function handleMessage(client, text) {
       return;
     }
     sendResponse(client, request, response);
+    for (const callback of client.afterResponse || []) callback();
+    client.afterResponse = [];
   } catch (error) {
+    client.afterResponse = [];
     console.error(`[${client.remote}] ${cmd} failed: ${error.message}`);
     sendResponse(client, request, { code: 1, message: error.message });
   }
@@ -540,6 +605,8 @@ const server = http.createServer(async (req, res) => {
         }
         if (route === 'catalog') {
           sendHttpJson(res, 200, { available: catalog.available, items: catalog.items.map(({id,name,type}) => ({id,name,type})),
+            furniture: furniture.getCatalog().furniture, furnitureShop: furniture.getCatalog().shop,
+            allFurniture: furniture.getCatalog().allFurniture, neighbors: catalog.neighbors.map(({id,name})=>({id,name})),
             pictures: catalog.pictures.map(({id,name}) => ({id,name})), notes: catalog.notes.map(({id,type})=>({id,type})), resources: catalog.resources,
             templates: TRAVEL_ROUTES.map(x => ({ id: x.id, name: x.destination, picture: makePostcard(x, -1, 0),
               variants: [-1,0,1,2].map(companion_id => ({ companion_id, picture: makePostcard(x, companion_id, 0) })) })) }); return;
@@ -549,6 +616,9 @@ const server = http.createServer(async (req, res) => {
           res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'private, max-age=3600', 'x-content-type-options': 'nosniff' }); res.end(bytes); return;
         }
         admin.requireAccount(account);
+        if (route === 'garden') {
+          sendHttpJson(res,200,{furniture:furniture.peekState(account),neighbor:neighbors.state(account),inventory:database.getItemState(account).house}); return;
+        }
         if (route === 'account' || route === 'export') { sendHttpJson(res, 200, database.exportAccount(account)); return; }
         if (route === 'audit') { sendHttpJson(res, 200, { operations: admin.audit(account), backups: admin.backups(account) }); return; }
         if (route === 'backup') {

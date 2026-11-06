@@ -1,12 +1,12 @@
 {
   "name": "travel-frog-server",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "Minimal local archive server for Travel Frog China",
   "scripts": {
     "start": "node server.js",
     "start:admin": "node start_admin.js",
-    "test": "node --test integration_test.js admin_test.js gameplay_test.js gameplay_protocol_test.js",
+    "test": "node --test integration_test.js admin_test.js gameplay_test.js gameplay_protocol_test.js furniture_test.js neighbors_test.js",
     "admin:install": "npm --prefix admin-ui ci",
     "admin:dev": "npm --prefix admin-ui run dev",
     "admin:build": "npm --prefix admin-ui run build"
