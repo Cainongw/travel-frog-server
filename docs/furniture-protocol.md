@@ -58,6 +58,14 @@
 
 客户端回包仍有本地副作用：`furniture_buy_shop` 成功回调会将商店行的 `num` 减一；put/take 成功回调会写本地槽位。因此若要发送完整 `furniture_load_furniture`，应安排在对应 session 回包之后。放材料后由下一次定时推进开启制作，避免在 put 回包前消耗槽位，随后又被客户端回调写回。
 
+### 旅行商人点击报错修复（2026-11-15）
+
+新版本地客户端的 `FurnitureShopItem.dataChanged` 直接用商品行的 `item_id` 查询 `ItemDB` 并读取 `img`；`FurnitureShopView.updateSelect` 也用它读取名称与说明。因此 `shop.shop_list` 每行必须含 `{shop_id,item_id,num}`，不能只传商品编号和余量。`requestBuy` 则使用 `shop_id`，成功后在客户端扣草、加物品和减余量；服务器应先回复，再推送权威余额、物品数和完整商店状态。
+
+这次设备 logcat 记录到 `TypeError: Cannot read property 'img' of undefined`，服务器列表中确实缺少 `item_id`。修复补齐该字段，未改变购买价格、限购或存档结构。WebSocket 回归先复现缺字段失败，再验证展示所需物品可查、购买后扣草/加物品/售罄、重复购买拒绝、重连仍售罄，以及回包先于状态推送。
+
+对应静态文件为 `exports/local-apk-build/decoded/assets/game/js/main.min.js`，SHA-256 `1061c822b3214ca574f0917228f60f5c3f69b94d2430a2d7eb8b23543b856929`；UTF-16 偏移：`FurnitureModel` 103610、`FurnitureShopView` 649687、`FurnitureShopItem` 656038。REA 静态分析 Evidence 为 `ev_54b142b4e7d9807890a683466175fa62c7c2902457d3d25867ff5872c41410e6`，本机证据包 `exports/rea-merchant-20261115.json`。只分析了 `main.min.js`，其余 16 个文件未分析，语义图达到默认节点/未知记录上限；精确字段来自另外的源码片段读取，不把静态图或私服测试当作原客户端修复后的实机验证。
+
 ## 从资源得到什么，以及没得到什么
 
 `catalog.readBundle` 解码到下列数据。下面的 decoded JSON 摘要来自 `SHA256(JSON.stringify(value))`，只用于复核此次解码值，不替代原始 EAB 摘要。

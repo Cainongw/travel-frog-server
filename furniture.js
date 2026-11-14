@@ -158,7 +158,9 @@ class FurnitureService {
       mate_list:[],mood:3,
       shop:{start_time:state.shop_start,leave_time:state.shop_end,shop_list:[...this.shop.values()]
         .filter(row=>!row.has_item || this.ownedItem(account,state,row.has_item)>0)
-        .map(row=>({shop_id:row.id,num:this.remaining(state,row)}))},
+        // The native merchant renderer resolves its image/name from item_id;
+        // shop_id alone is only enough for the purchase RPC.
+        .map(row=>({shop_id:row.id,item_id:row.item_id,num:this.remaining(state,row)}))},
       job:state.job ? clone(state.job) : null,
     };
   }

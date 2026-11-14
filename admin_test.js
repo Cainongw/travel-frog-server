@@ -115,9 +115,10 @@ async function startServer(t, options={}) {
       socket.addEventListener('error', reject, { once: true });
     });
     let session = 0;
-    const events = [], pending = new Map();
+    const events = [], messages = [], pending = new Map();
     socket.addEventListener('message', message => {
       const value = JSON.parse(message.data);
+      messages.push(value);
       if (value.session != null && pending.has(value.session)) {
         pending.get(value.session)(value.data);
         pending.delete(value.session);
@@ -134,7 +135,7 @@ async function startServer(t, options={}) {
     const token = await send('hall.gen_token', { account });
     await send('hall.login', { token: token.token });
     await send('client.load_all_info');
-    return { socket, events, send };
+    return { socket, events, messages, send };
   }
   return { base, api, get, post, connect };
 }
@@ -453,6 +454,39 @@ test('HTTP snapshot restore protects state and invalidates connected game client
   assert.equal(list.snapshots[0].summary.clover,90);
   const reconnected=await connect(account);
   assert.equal(reconnected.events.find(x=>x.cmd==='client_load_role').data.res.clover_point,60);
+});
+
+test('merchant rows resolve client item details and purchases synchronize after the reply', async t => {
+  const {get,post,connect}=await startServer(t),account='merchant-frog';
+  await post(account,'create',{});
+  await post(account,'role',{clover:10});
+  const catalog=await get('catalog'),items=new Map(catalog.items.map(x=>[x.id,x]));
+  const client=await connect(account);
+  const initial=client.events.find(x=>x.cmd==='furniture_load_furniture').data;
+  // FurnitureShopItem and FurnitureShopView look up ItemDB by the row's
+  // item_id directly, independently of the shop_id used for the purchase.
+  for(const row of initial.shop.shop_list){
+    assert.ok(items.get(row.item_id)?.name,'merchant row must resolve client item details');
+    assert.equal(catalog.furnitureShop.find(x=>x.id===row.shop_id).item_id,row.item_id);
+  }
+  const row=initial.shop.shop_list.find(x=>x.item_id===10001);
+  assert.equal(row.num,1);
+  const begin=client.messages.length;
+  assert.equal((await client.send('furniture.buy_shop',{shop_id:row.shop_id})).code,0);
+  await client.send('client.hello');
+  const updates=client.messages.slice(begin);
+  assert.ok(updates[0].session,'reply precedes authoritative pushes because the client also deducts locally');
+  assert.equal(updates.find(x=>x.cmd==='clover_update').data.clover,8);
+  assert.deepEqual(updates.find(x=>x.cmd==='item_update').data.item,{item_id:10001,count:1});
+  assert.equal(updates.find(x=>x.cmd==='furniture_load_furniture').data.shop.shop_list.find(x=>x.shop_id===row.shop_id).num,0);
+  assert.equal((await client.send('furniture.buy_shop',{shop_id:row.shop_id})).code,1);
+  const reconnected=await connect(account);
+  const state=await reconnected.send('furniture.load_furniture');
+  assert.equal(state.shop.shop_list.find(x=>x.shop_id===row.shop_id).num,0);
+  const save=await get(`export?account=${account}`);
+  assert.equal(save.account.clover,8);
+  assert.equal(save.items.house.find(x=>x.item_id===10001).count,1);
+  assert.equal(save.furniture.purchases[row.shop_id],1);
 });
 
 test('garden workbench, construction, placement and neighbor rewards use native protocol', async t => {
