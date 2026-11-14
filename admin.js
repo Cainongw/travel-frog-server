@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { TRAVEL_ROUTES, makePostcard } = require('./travel_data');
 const { validateFurnitureState } = require('./furniture');
+const { SnapshotService } = require('./snapshots');
 
 function integer(value, name, min = 0, max = 999999) {
   if (!Number.isSafeInteger(value) || value < min || value > max) throw Error(`${name}: expected integer ${min}..${max}`);
@@ -18,6 +19,7 @@ class AdminService {
     this.db = database;
     this.catalog = catalog;
     this.services = services;
+    this.snapshots = new SnapshotService(database);
     database.db.exec(`
       CREATE TABLE IF NOT EXISTS admin_operations (
         id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT UNIQUE NOT NULL,
@@ -77,8 +79,19 @@ class AdminService {
         return { ...JSON.parse(prior.result_json), replayed: true };
       }
       if (action !== 'create') this.requireAccount(account);
+      if(!['import','snapshot-create','snapshot-restore','archive-activate'].includes(action)&&this.db.isOfficialReadOnly(account))throw Error('请先创建存档快照，即可解除只读并测试玩法。');
       let result = {};
       switch (action) {
+        case 'snapshot-create': {
+          const snapshot=this.snapshots.create(account,body.label ?? '');
+          result = { snapshot,...this.db.activateOfficial(account,snapshot.id) }; break;
+        }
+        case 'snapshot-restore': {
+          result = this.snapshots.restore(account,body.snapshot_id,body.confirm_account);
+          Object.assign(result,this.db.activateOfficial(account,body.snapshot_id)); break;
+        }
+        case 'archive-activate':
+          result=this.db.activateOfficial(account,this.snapshots.latestVerified(account)); break;
         case 'furniture-put':
         case 'furniture-take':
         case 'furniture-buy':
@@ -169,6 +182,22 @@ class AdminService {
 
   validateSave(save) {
     if (save.format !== 'travel-frog-save' || ![1,2,3,4,5,6].includes(save.version)) throw Error('Unsupported save format');
+    if(save.official?.mode==='preserved'){
+      const {convertCapture,verifyImport}=require('./official_import');
+      const normalized=convertCapture(save.official.capture);
+      if(normalized.account.account!==save.account.account)throw Error('Official archive account mismatch');
+      const {FrogDatabase}=require('./database');
+      const check=new FrogDatabase(':memory:');
+      try{check.importAccount(save,true);verifyImport(normalized,check);}finally{check.close();}
+      return;
+    }
+    if(save.official && save.official.mode!=='active')throw Error('Invalid official archive mode');
+    let originalPictures=new Map();
+    if(save.official?.mode==='active'){
+      const normalized=require('./official_import').convertCapture(save.official.capture);
+      if(normalized.account.account!==save.account.account)throw Error('Official archive account mismatch');
+      originalPictures=new Map(normalized.postcards.map(x=>[x.id,x]));
+    }
     validateFurnitureState(save.furniture,this.catalog);
     const role = save.account;
     for (const key of ['clover','ticket','trip_count','created_at','icon','postcard_sequence']) {
@@ -182,7 +211,8 @@ class AdminService {
     for (const p of save.postcards || []) {
       integer(p.id, 'postcard id', 1, Number.MAX_SAFE_INTEGER);
       if (ids.has(p.id)) throw Error('Duplicate postcard id'); ids.add(p.id);
-      this.validatePostcard(p);
+      const original=originalPictures.get(p.id);
+      if(!original || original.pic_id!==p.pic_id || JSON.stringify(original.layers)!==JSON.stringify(p.layers))this.validatePostcard(p);
       if (p.location && !['album','new','recycle','gift'].includes(p.location)) throw Error('Invalid postcard location');
     }
     const validateItem = x => {

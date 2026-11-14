@@ -257,6 +257,10 @@ class FrogDatabase {
     migrateGameplay(this);
     migrateFurniture(this);
     migrateNeighbors(this);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS official_archives (
+      account TEXT PRIMARY KEY REFERENCES accounts(account) ON DELETE CASCADE,
+      data_json TEXT NOT NULL
+    )`);
     this.db.exec(`UPDATE accounts SET postcard_sequence = MAX(postcard_sequence,
       COALESCE((SELECT MAX(id) FROM postcards WHERE account=accounts.account),0),
       COALESCE((SELECT MAX(CAST(j.value AS INTEGER)) FROM mails m, json_each(m.pictures_json) j
@@ -317,6 +321,7 @@ class FrogDatabase {
 
   seedBasicState(value) {
     const account = normalizeAccount(value);
+    if(this.db.prepare('SELECT 1 FROM official_archives WHERE account=?').get(account))return;
     const insertPlot = this.db.prepare(`
       INSERT OR IGNORE INTO clover_plots(account,clover_id,element,sprite,last_harvest,rebirth_span)
       VALUES (?,?,?,?,0,7200)
@@ -342,8 +347,34 @@ class FrogDatabase {
     return this.db.prepare('SELECT account, uid, frog_name, updated_at FROM accounts ORDER BY updated_at DESC').all();
   }
 
+  getOfficialArchive(value) {
+    const row=this.db.prepare('SELECT data_json FROM official_archives WHERE account=?').get(normalizeAccount(value));
+    return row?JSON.parse(row.data_json):null;
+  }
+
+  isOfficialReadOnly(value) {
+    const archive=this.getOfficialArchive(value);
+    return !!archive && archive.mode !== 'active';
+  }
+
+  activateOfficial(value, snapshotId) {
+    const account=normalizeAccount(value), archive=this.getOfficialArchive(account);
+    if(!archive || archive.mode==='active') return {activated:false};
+    const row=this.ensureAccount(account), changes={};
+    // Official trips/parties have no local timer record. Resume at home without
+    // fabricating rewards or altering collected possessions. The source stays intact.
+    if(row.frog_status!==0 && !this.getTravelState(account))changes.frog_status=0;
+    if(row.frog_motion<0)changes.frog_motion=0;
+    if(Object.keys(changes).length)this.updateAccount(account,changes);
+    archive.mode='active';
+    archive.activation={snapshot_id:snapshotId,at:Math.floor(Date.now()/1000),normalized:changes};
+    this.db.prepare('UPDATE official_archives SET data_json=? WHERE account=?').run(JSON.stringify(archive),account);
+    return {activated:true,activation:archive.activation};
+  }
+
   getRole(value) {
     const row = this.ensureAccount(value);
+    const source=this.getOfficialArchive(value)?.protocols?.client_load_role;
     const achievements = this.db.prepare(
       'SELECT achievement_id AS id, achieved_at AS time FROM achievements WHERE account = ? ORDER BY achievement_id',
     ).all(row.account);
@@ -356,17 +387,20 @@ class FrogDatabase {
       uid: row.uid,
       res: { clover_point: row.clover, ticket: row.ticket },
       settings: {
+        ...source?.settings,
         client: row.settings_json,
         push_switch: Boolean(row.push_switch),
         rank_switch: Boolean(row.rank_switch),
       },
       misc: {
+        ...source?.misc,
         picture_cnt: this.countPostcards(row.account, 'album'),
         wx_push_reward: false,
         wx_my_reward: false,
         create_time: row.created_at,
       },
       frog: {
+        ...source?.frog,
         name: row.frog_name,
         cur_achieve: row.current_achievement,
         achieves: achievements.map(item => item.id),
@@ -979,8 +1013,10 @@ class FrogDatabase {
     const account = normalizeAccount(value);
     const unlocks = this.db.prepare('SELECT entry_id AS id, description_ids_json FROM encyclopedia_unlocks WHERE account = ? ORDER BY entry_id').all(account);
     const showSub = this.db.prepare('SELECT entry_id AS id, sub_id FROM encyclopedia_show_sub WHERE account = ? ORDER BY entry_id').all(account);
+    const original=this.getOfficialArchive(account)?.protocols?.encyclopedia_load;
+    const parents=new Set((original?.unlock_desc||[]).map(x=>x.id));
     return {
-      unlock_list: unlocks.map(row => row.id),
+      unlock_list: original? [...new Set([...(original.unlock_list||[]),...unlocks.map(x=>x.id).filter(id=>!parents.has(id))])] : unlocks.map(row => row.id),
       unlock_desc: unlocks.map(row => ({ id: row.id, list: parseJson(row.description_ids_json, []) })),
       show_sub: showSub,
     };
@@ -1089,6 +1125,7 @@ class FrogDatabase {
       },
       furniture: exportFurnitureState(this, account),
       neighbors: getNeighborState(this, account),
+      official: this.getOfficialArchive(account),
     };
   }
 
@@ -1104,7 +1141,7 @@ class FrogDatabase {
       if (replace) {
         for (const table of ['postcards', 'moments', 'travel_notes', 'stories', 'handbook', 'achievements',
           'encyclopedia_unlocks', 'encyclopedia_show_sub', 'gift_specialties', 'inventory', 'shop_purchases',
-          'clover_plots', 'mails', 'travel_trips', 'travel_events', 'visitor_state', 'visitor_acquire', 'gacha_state', 'furniture_state', 'neighbor_state']) {
+          'clover_plots', 'mails', 'travel_trips', 'travel_events', 'visitor_state', 'visitor_acquire', 'gacha_state', 'furniture_state', 'neighbor_state', 'official_archives']) {
           this.db.prepare(`DELETE FROM ${table} WHERE account = ?`).run(account);
         }
       }
@@ -1277,8 +1314,10 @@ class FrogDatabase {
       importGachaState(this, account, snapshot.items?.gacha);
       importFurnitureState(this, account, snapshot.furniture);
       importNeighborState(this, account, snapshot.neighbors);
-
-      this.seedBasicState(account);
+      if(snapshot.official){
+        if(!['preserved','active'].includes(snapshot.official.mode)||!snapshot.official.protocols)throw Error('Invalid official archive');
+        this.db.prepare('INSERT OR REPLACE INTO official_archives(account,data_json) VALUES (?,?)').run(account,JSON.stringify(snapshot.official));
+      } else this.seedBasicState(account);
     });
     return this.exportAccount(account);
   }

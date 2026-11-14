@@ -2,6 +2,7 @@
   import { api, setToken, downloadJson } from './api.js';
   import Postcard from './Postcard.svelte';
   import Garden from './Garden.svelte';
+  import Snapshots from './Snapshots.svelte';
 
   let secret = '';
   let connected = false;
@@ -16,6 +17,8 @@
   let snapshot = null;
   let garden = null;
   let activity = { operations: [], backups: [] };
+  let snapshotPage = { snapshots: [], next_cursor: null };
+  let unsupportedCalls = [];
   let search = '';
   let newAccount = '';
   let tab = 'overview';
@@ -106,9 +109,11 @@
     if (!preserve) { snapshot = null; garden = null; previewAlbum = null; }
     importSave = null; importName = ''; importConfirm = ''; importAcknowledged = false;
     try {
-      const [save, log, courtyard] = await Promise.all([api('account', account), api('audit', account), api('garden', account)]);
+      const [save, log, courtyard, saves, missing] = await Promise.all([api('account', account), api('audit', account), api('garden', account), api('snapshots', account), api('unsupported',account)]);
       if (version !== requestVersion) return;
       snapshot = save; activity = log; garden = courtyard;
+      snapshotPage = saves;
+      unsupportedCalls = missing.calls;
       frogName = save.account.frog_name; clover = save.account.clover; ticket = save.account.ticket;
       season = save.weather.season; hours = save.weather.hours_type; weather = save.weather.weather || 1;
     } catch (e) { if (version === requestVersion) error = e.message; }
@@ -124,10 +129,11 @@
     } catch (e) { error = e.message; } finally { busy = false; }
   }
   async function mutate(action, body, message, account = selected) {
+    if(snapshot?.official && snapshot.official.mode!=='active' && !['import','create','snapshot-create','snapshot-restore','archive-activate'].includes(action)) { error='先创建快照即可解除只读并开始测试。'; return null; }
     busy = true; clearMessages();
     try {
       const result = await api(action, account, { body });
-      notice = `${message}${result.replayed ? '（此操作已处理，未重复执行）' : ''}`;
+      notice = `${message}${result.activated ? ' 已解除只读，请重新进入游戏开始测试。' : ''}${result.replayed ? '（此操作已处理，未重复执行）' : ''}`;
       const list = await api('accounts'); accounts = list.accounts;
       await loadAccount(account, true);
       return result;
@@ -187,6 +193,8 @@
     if (importConfirm !== selected || !importAcknowledged || !importSave) return;
     mutate('import', { save: importSave }, '存档已导入。替换前的存档已自动备份，可在操作记录中下载。客户端需重新进入游戏。');
   }
+  Object.assign(actionNames,{'snapshot-create':'创建存档快照','snapshot-restore':'从快照回档'});
+  Object.assign(actionNames,{'archive-activate':'启用存档测试玩法'});
 </script>
 
 <svelte:head><title>{connected ? (snapshot?.account.frog_name || '账号管理') + ' · ' : ''}青蛙邮局</title></svelte:head>
@@ -226,6 +234,7 @@
       <div class="sidebar-bottom"><span class="dot online"></span><span>服务器已连接<small>v{status.version} · SQLite {status.schema}</small></span><button class="text-button" onclick={logout} disabled={busy}>断开</button></div>
     </aside>
     <main class="workspace">
+      {#if snapshot?.official}<div class="notice" role="status">{#if snapshot.official.mode==='active'}测试模式：已解除只读，使用私服正常玩法逻辑；可随时从快照回档。原始官方记录仍保留。{:else}请先在“存档管理”创建快照，完成后自动解除只读。{#if snapshotPage.snapshots.length}<button class="secondary" disabled={busy} onclick={()=>mutate('archive-activate',{},'测试玩法已启用。')}>已有快照，启用玩法</button>{/if}{/if}</div>{/if}
       <header class="topbar"><div><span class="breadcrumb">青蛙邮局 / {tabs.find(x => x.id === tab)?.label}</span><h1>{tabs.find(x => x.id === tab)?.label}</h1></div><div class="top-actions"><span class="online-label">{status.online || 0} 个客户端在线</span><button class="secondary" onclick={refresh} disabled={busy || loadingAccount}>{busy ? '处理中…' : '↻ 刷新状态'}</button></div></header>
       {#if error}<div class="notice error" role="alert">{error}<button class="text-button" onclick={() => error = ''}>关闭</button></div>{/if}
       {#if notice}<div class="notice success" role="status">{notice}<button class="text-button" onclick={() => notice = ''}>关闭</button></div>{/if}
@@ -257,10 +266,12 @@
           <div class="two-columns mail-layout"><section class="panel"><div class="panel-heading"><h2>寄送奖励邮件</h2><span>PARCEL</span></div><form onsubmit={sendMail}><fieldset disabled={busy}><label>邮件标题<input bind:value={mailTitle} maxlength="100" required /></label><label>正文<textarea bind:value={mailMessage} rows="4" maxlength="2000"></textarea></label><div class="field-row"><label>三叶草<input type="number" bind:value={giftClover} min="0" max="999999" required /></label><label>抽奖券<input type="number" bind:value={giftTicket} min="0" max="999" required /></label></div><div class="attachment-box"><h3>添加物品</h3><label><span class="sr-only">搜索物品</span><input bind:value={itemSearch} placeholder="按名称或编号搜索…" /></label><div class="item-picker"><label><span class="sr-only">物品</span><select bind:value={itemId} disabled={!catalog.available}>{#each filteredItems as item}<option value={item.id}>#{item.id} {item.name}</option>{/each}</select></label><label><span class="sr-only">数量</span><input type="number" min="1" max="99" bind:value={itemCount} /></label><button type="button" class="secondary" onclick={addItem} disabled={!filteredItems.some(x => x.id === Number(itemId))}>添加</button></div>{#each giftItems as item}<div class="attachment"><span>{catalog.items.find(x => x.id === item.item_id)?.name || item.item_id} <small>× {item.count}</small></span><button type="button" class="text-button" onclick={() => giftItems = giftItems.filter(x => x !== item)}>移除</button></div>{/each}</div><div class="delivery-address"><small>寄往</small><strong>{snapshot.account.frog_name}</strong><code>{selected}</code></div><button class="primary wide">寄出奖励邮件 <span>↗</span></button></fieldset></form></section>
             <section class="panel"><div class="panel-heading"><h2>邮箱记录</h2><span>{snapshot.mails.length} 封</span></div><div class="mail-list">{#each snapshot.mails as mail}<article><div><span class="mail-icon">✉</span><h3>{mail.title}</h3><span class="tag">{mail.opened ? '已领取' : mail.read ? '已读' : '未读'}</span></div><p>{mail.message}</p><small>{date(mail.timestamp)} · 草 {mail.resource?.clover_point || 0} / 券 {mail.resource?.ticket || 0}{mail.pictures?.length ? ' / 明信片 ' + mail.pictures.length : ''}</small></article>{:else}<div class="empty-small">还没有邮件。</div>{/each}</div></section></div>
         {:else if tab === 'archive'}
+          <Snapshots account={selected} page={snapshotPage} {busy} onAction={mutate} />
           <div class="two-columns"><section class="panel"><div class="panel-heading"><h2>保存一份回忆</h2><span>EXPORT</span></div><p class="muted">导出当前账号的完整私服存档，包括相册、背包、旅行、笔记和邮件。JSON 可用于迁移或恢复。</p><button class="primary" onclick={() => exportSave()} disabled={busy}>↓ 下载存档 JSON</button><p class="footnote">这是当前私服的存档，不会从官方账号自动读取历史进度。</p></section><section class="panel"><div class="panel-heading"><h2>导入存档</h2><span>RESTORE</span></div><p class="muted">导入会替换当前账号数据。服务器会先保存自动备份，可在操作记录中下载。</p><label class="file-picker">选择 JSON 文件<input type="file" accept=".json,application/json" onchange={chooseImport} disabled={busy} /></label>{#if importSave}<form onsubmit={importArchive}><div class="import-summary"><strong>{importName}</strong><small>v{importSave.version} · {importSave.postcards?.length || 0} 张明信片 · {importSave.account.frog_name}</small></div><label>输入账号 {selected} 确认替换<input bind:value={importConfirm} autocomplete="off" required /></label><label class="checkbox"><input type="checkbox" bind:checked={importAcknowledged} />我确认用此文件替换所选账号的存档</label><button class="danger" disabled={busy || importConfirm !== selected || !importAcknowledged}>确认替换存档</button></form>{/if}</section></div>
           <section class="panel"><div class="panel-heading"><h2>明信片档案</h2><label><span class="sr-only">相册范围</span><select bind:value={albumLocation}><option value="all">全部位置</option>{#each Object.entries(locations) as [key, value]}<option value={key}>{value}</option>{/each}</select></label></div>{#if previewAlbum}<div class="album-preview"><Postcard picture={previewAlbum} compact /><button class="text-button" onclick={() => previewAlbum = null}>收起预览</button></div>{/if}<div class="table-wrap"><table><thead><tr><th>记录编号</th><th>图片编号</th><th>所在位置</th><th>图层</th><th>操作</th></tr></thead><tbody>{#each album as picture}<tr><td>#{picture.id}</td><td>{picture.pic_id}</td><td><span class="tag">{locations[picture.location] || picture.location}</span></td><td>{picture.layers.length}</td><td><button class="text-button" onclick={() => previewAlbum = picture}>预览</button></td></tr>{:else}<tr><td colspan="5" class="empty-small">这里暂时没有明信片。</td></tr>{/each}</tbody></table></div></section>
           <section class="panel"><div class="panel-heading"><h2>背包与库存</h2><span>INVENTORY</span></div><p class="muted">背包：{snapshot.items.bag.map(id => id < 0 ? '空' : catalog.items.find(x => x.id === id)?.name || '#' + id).join(' / ')}</p><div class="inventory-grid">{#each snapshot.items.house as item}<div><span>{catalog.items.find(x => x.id === item.item_id)?.name || '#' + item.item_id}</span><strong>× {item.count}</strong></div>{:else}<p class="muted">库存为空。</p>{/each}</div></section>
         {:else if tab === 'activity'}
+          <section class="panel"><div class="panel-heading"><h2>未实现功能日志</h2><span>{unsupportedCalls.length} 类</span></div><p class="muted">点击未支持功能后在此聚合记录；“仅快照读取”表示目前能展示原数据，尚无玩法实现。参数只保留结构和数字，文本与凭据已脱敏。</p><div class="table-wrap"><table><thead><tr><th>协议</th><th>状态</th><th>次数</th><th>最近触发</th><th>参数摘要</th></tr></thead><tbody>{#each unsupportedCalls as call}<tr><td><code>{call.command}</code></td><td>{call.reason==='snapshot_read_only'?'仅快照读取':call.reason==='archive_readonly'?'尚未解除只读':'未实现'}</td><td>{call.count}</td><td>{date(call.last_at)}</td><td><code>{JSON.stringify(call.sample)}</code></td></tr>{:else}<tr><td colspan="5" class="empty-small">还没有触发未支持功能。</td></tr>{/each}</tbody></table></div></section>
           <div class="section-intro"><div><p class="eyebrow">EVERY LETTER HAS A TRACE</p><h2>每一次修改，都有记录。</h2></div><p>当前账号最近 100 条管理操作。</p></div><section class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>账号</th><th>请求编号</th></tr></thead><tbody>{#each activity.operations as operation}<tr><td>{date(operation.created_at)}</td><td>{actionNames[operation.action] || operation.action}</td><td>{operation.account}</td><td><code class="request-id">{operation.request_id}</code></td></tr>{:else}<tr><td colspan="4" class="empty-small">尚无管理操作记录。</td></tr>{/each}</tbody></table></div></section><section class="panel"><div class="panel-heading"><h2>替换前的自动备份</h2><span>RECOVERY</span></div><p class="muted">每次导入前自动保留当前存档。下载后可在存档管理中重新导入。</p>{#each activity.backups as backup}<div class="backup-row"><span>备份 #{backup.id}<small>{date(backup.created_at)}</small></span><button class="secondary" onclick={() => exportSave(backup.id)} disabled={busy}>下载 JSON</button></div>{:else}<p class="empty-small">尚未执行存档替换，无自动备份。</p>{/each}</section>
         {/if}
       {/if}

@@ -58,7 +58,7 @@ async function freePort() {
   return port;
 }
 
-async function startServer(t) {
+async function startServer(t, options={}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'frog-admin-test-'));
   const port = await freePort();
   const sockets = new Set();
@@ -66,7 +66,7 @@ async function startServer(t) {
   const child = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
     cwd: __dirname,
     env: { ...process.env, FROG_HOST: '127.0.0.1', FROG_PORT: String(port), FROG_DB: path.join(directory, 'test.sqlite'),
-      FROG_ADMIN_TOKEN: TOKEN, FROG_ASSETS: assets, FROG_TRIP_SECONDS: '3600', FROG_VISIT_SECONDS: '60' },
+      FROG_ADMIN_TOKEN: TOKEN, FROG_ASSETS: assets, FROG_TRIP_SECONDS: options.tripSeconds || '3600', FROG_VISIT_SECONDS: '60' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
@@ -383,6 +383,76 @@ test('local APK catalog is decoded when available', t => {
   assert.ok(catalog.pictures.some(x => x.id === 100));
   assert.ok(catalog.notes.some(x => x.id === 1000));
   assert.equal(catalog.resources[190], 'Picture/Normal/roof1_qw');
+});
+
+test('snapshot unlocks imported account, mutations and travel progress, unsupported calls are retained',async t=>{
+  const {get,post,connect}=await startServer(t,{tripSeconds:'1'}),account='official-123';
+  const raw={
+    client_load_role:{uid:123,res:{clover_point:100,ticket:10},settings:{client:'{"guideStep":"Complete"}'},misc:{picture_cnt:1,create_time:100},frog:{name:'测试蛙',icon:0,cur_achieve:0,achieves:[0],achieves_time:{},status:3,motion:-1}},
+    album_load_all:{id_list:[{id:5,pic_id:100}]},album_load_by_id_list:{pic_list:[{id:5,pic_id:100,layers:[{layer:[1,-0.5,2.5]}]}]},album_load_recover:{pictures:{}},album_load_new:{pictures:{}},travel_load_gift:{pictures:[],specialtys:{}},
+    item_load_items:{house:[{item_id:0,count:4}],bag:[0,-1,-1,-1],desk:Array(8).fill(-1),gacha:{color_ball:-1}},travel_load_note:{note_list:[]},
+    furniture_load_furniture:{bench:Array(10).fill(-1),bench_lock:false,has_fur:[1001],put_fur:[{id:1001,type:1}],shop:{start_time:100,leave_time:200}},
+    clover_load_clovers:[],weather_load:{season:1,hours_type:1,weather:1},mail_load:{},
+    furniture_load_flowerpot:{list:[401],plant_list:[],show_index:1},
+  };
+  const capture={format:'frog-official-protocol-capture',complete:true,finished_at:200000,account:'source-user',responses:Object.fromEntries(Object.entries(raw).map(([cmd,data])=>[cmd,[{data,time:150000}]]))};
+  const save=require('./official_import').convertCapture(capture);
+  await post(account,'create',{});await post(account,'import',{save});
+  const frozen=await connect(account);assert.equal(frozen.events.find(x=>x.cmd==='client_load_role').data.frog.status,3);
+  const checkpoint=await post(account,'snapshot-create',{label:'测试前'});assert.equal(checkpoint.activated,true);
+  const client=await connect(account);
+  assert.equal(client.events.find(x=>x.cmd==='client_load_role').data.frog.status,0);
+  assert.deepEqual(client.events.find(x=>x.cmd==='furniture_load_flowerpot').data,raw.furniture_load_flowerpot,'static unimplemented state remains visible');
+  assert.equal((await client.send('item.buy',{shop_id:0})).code,0);
+  assert.equal((await client.send('client.load_role')).res.clover_point,90);
+  assert.equal((await client.send('album.delete',{id:5})).code,0);
+  assert.equal((await client.send('album.load_all')).id_list.length,0,'does not replay frozen list');
+  const start=client.events.length;
+  assert.equal((await client.send('item.set_bag_completed',{completed:true})).code,0);
+  await eventAfter(client,start,x=>x.cmd==='notify_new_event'&&x.data.event.evt_type===2);
+  assert.equal((await client.send('album.load_new')).pictures.length,1,'active timer settles imported trip');
+  const unsupported=await client.send('pray.compose',{id:8,token:'do-not-log',message:'private-text'});
+  assert.equal(unsupported.code,1);assert.equal(unsupported.supported,false);
+  await client.send('pray.compose',{id:8,token:'do-not-log'});
+  await client.send('furniture.load_flowerpot');
+  const calls=(await get(`unsupported?account=${account}`)).calls;
+  assert.equal(calls.find(x=>x.command==='pray_compose').count,2);
+  assert.equal(calls.find(x=>x.command==='furniture_load_flowerpot').reason,'snapshot_read_only');
+  assert.ok(!JSON.stringify(calls).includes('do-not-log'));
+  const activeSave=await get(`export?account=${account}`);
+  assert.equal(activeSave.official.mode,'active');assert.deepEqual(activeSave.official.capture,capture);
+  await post(account,'import',{save:activeSave});
+  await post(account,'snapshot-restore',{snapshot_id:checkpoint.snapshot.id,confirm_account:account});
+  const after=await connect(account);
+  assert.equal((await after.send('album.load_all')).id_list.length,1);
+  assert.equal((await after.send('client.load_role')).res.clover_point,100);
+  assert.equal((await after.send('item.buy',{shop_id:0})).code,0,'restored original snapshot remains writable');
+  assert.equal((await get(`unsupported?account=${account}`)).calls.find(x=>x.command==='pray_compose').count,2,'diagnostics survive rollback');
+});
+
+test('HTTP snapshot restore protects state and invalidates connected game clients', async t => {
+  const {base,get,post,connect}=await startServer(t),account='snapshot-game';
+  assert.equal((await fetch(`${base}/api/admin/snapshots?account=${account}`)).status,401);
+  await post(account,'create',{});
+  await post(account,'role',{clover:60});
+  const saved=await post(account,'snapshot-create',{label:'出发前'});
+  assert.equal(saved.snapshot.summary.clover,60);
+  const key=randomUUID();
+  await post(account,'role',{clover:90});
+  const client=await connect(account),index=client.events.length;
+  const closed=new Promise(resolve=>client.socket.addEventListener('close',resolve,{once:true}));
+  await post(account,'snapshot-restore',{snapshot_id:saved.snapshot.id,confirm_account:'wrong'},randomUUID(),400);
+  const restored=await post(account,'snapshot-restore',{snapshot_id:saved.snapshot.id,confirm_account:account},key);
+  await eventAfter(client,index,x=>x.cmd==='notify_reload');
+  await Promise.race([closed,new Promise((_,reject)=>setTimeout(()=>reject(Error('Game socket not closed after restore')),2000))]);
+  assert.equal((await get(`account?account=${account}`)).account.clover,60);
+  assert.equal((await post(account,'snapshot-restore',{snapshot_id:saved.snapshot.id,confirm_account:account},key)).replayed,true);
+  const list=await get(`snapshots?account=${account}`);
+  assert.equal(list.snapshots.length,2);
+  assert.equal(list.snapshots[0].id,restored.safety_snapshot_id);
+  assert.equal(list.snapshots[0].summary.clover,90);
+  const reconnected=await connect(account);
+  assert.equal(reconnected.events.find(x=>x.cmd==='client_load_role').data.res.clover_point,60);
 });
 
 test('garden workbench, construction, placement and neighbor rewards use native protocol', async t => {

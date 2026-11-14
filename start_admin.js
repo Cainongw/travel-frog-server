@@ -3,6 +3,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const assetConfig=path.join(__dirname,'data','assets.local.json');
+if(!process.env.FROG_ASSETS&&fs.existsSync(assetConfig))process.env.FROG_ASSETS=JSON.parse(fs.readFileSync(assetConfig,'utf8')).root;
 
 // Keep a per-install secret outside Git. This launcher defaults to local-only;
 // FROG_HOST=0.0.0.0 explicitly enables remote HTTP management.

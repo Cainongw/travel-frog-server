@@ -15,6 +15,7 @@ const { AdminService } = require('./admin');
 const { GameplayService } = require('./gameplay');
 const { FurnitureService } = require('./furniture');
 const { NeighborService, guestProtocol } = require('./neighbors');
+const { ProtocolDiagnostics, describe } = require('./protocol_diagnostics');
 
 const HOST = process.env.FROG_HOST || '0.0.0.0';
 const PORT = Number(process.env.FROG_PORT || 8080);
@@ -44,6 +45,7 @@ const gameplay = new GameplayService(database, catalog);
 const furniture = new FurnitureService(database, catalog, {craftSeconds:Number(process.env.FROG_CRAFT_SECONDS || 60)});
 const neighbors = new NeighborService(database, catalog, {durationSeconds:Number(process.env.FROG_NEIGHBOR_SECONDS || 1800),cooldownSeconds:Number(process.env.FROG_NEIGHBOR_COOLDOWN || 21600)});
 const admin = new AdminService(database, catalog, { furniture, neighbors });
+const diagnostics = new ProtocolDiagnostics(database);
 const ADMIN_TOKEN = process.env.FROG_ADMIN_TOKEN || '';
 if (ADMIN_TOKEN && ADMIN_TOKEN.length < 24) throw Error('FROG_ADMIN_TOKEN must be at least 24 characters');
 const UI_ROOT = path.join(__dirname, 'admin-ui', 'dist');
@@ -57,6 +59,14 @@ function hasAdminToken(req) {
 function pushAdminResult(result) {
   if (result.replayed) return;
   for (const client of clients) {
+    if ((result.action === 'snapshot-restore' || result.activated) && client.account === result.account && !client.socket.destroyed) {
+      client.synced = false;
+      client.authed = false;
+      client.invalidated = true;
+      sendEvent(client,'notify_reload',{});
+      client.socket.end();
+      continue;
+    }
     if (!client.synced || client.account !== result.account || client.socket.destroyed) continue;
     const account = client.account;
     if (result.mail) sendEvent(client, 'notify_new_mail', { mail: result.mail });
@@ -151,45 +161,63 @@ function sendEvent(client, cmd, data) {
 
 function pushInitialState(client) {
   const account = client.account;
+  const official=database.getOfficialArchive(account);
+  if(official && official.mode!=='active'){
+    // Preserve official-only modules without inventing their server-side timers.
+    for(const [cmd,data]of Object.entries(official.protocols)){
+      if(cmd==='client_hello'||cmd==='client_load_all_info'||cmd==='album_load_by_id_list'||!cmd.includes('load'))continue;
+      sendEvent(client,cmd,data);
+    }
+    return;
+  }
+  const sent = new Set();
+  function emit(cmd,data,retainOriginal=false){
+    sent.add(cmd);
+    sendEvent(client,cmd,retainOriginal && Object.hasOwn(official?.protocols||{},cmd)?official.protocols[cmd]:data);
+  }
   database.advanceTravel(account, TRAVEL_ROUTES, makePostcard);
   furniture.advance(account);
   database.getVisitorState(account, nowSeconds(), VISIT_SECONDS);
   neighbors.sync(account);
-  sendEvent(client, 'weather_load', database.getWeather(account));
-  sendEvent(client, 'client_load_events', database.getTravelEvents(account));
-  sendEvent(client, 'client_load_role', database.getRole(account));
-  sendEvent(client, 'client_load_decorate', { has_list: [], put_id: 0, status: 0 });
-  sendEvent(client, 'clover_load_clovers', database.getCloverPlots(account));
-  sendEvent(client, 'item_load_items', database.getItemState(account));
-  sendEvent(client, 'item_load_handbook', database.getHandbook(account));
-  sendEvent(client, 'item_load_shop_info', { purchased: database.getShopPurchases(account) });
-  sendEvent(client, 'album_load_all', { id_list: database.getPostcards(account, 'album') });
-  sendEvent(client, 'album_load_new', {
+  emit('weather_load', database.getWeather(account));
+  emit('client_load_events', database.getTravelEvents(account));
+  emit('client_load_role', database.getRole(account));
+  emit('client_load_decorate', { has_list: [], put_id: 0, status: 0 },true);
+  emit('clover_load_clovers', database.getCloverPlots(account));
+  emit('item_load_items', database.getItemState(account));
+  emit('item_load_handbook', database.getHandbook(account));
+  emit('item_load_shop_info', { purchased: database.getShopPurchases(account) });
+  emit('album_load_all', { id_list: database.getPostcards(account, 'album') });
+  emit('album_load_new', {
     pictures: database.getPostcards(account, 'new'), visted_pic: [], has_ads: false, is_share: false,
   });
-  sendEvent(client, 'album_load_recover', { pictures: database.getPostcards(account, 'recycle') });
-  sendEvent(client, 'travel_load_gift', database.getGiftBox(account));
-  sendEvent(client, 'travel_load_note', { note_list: database.getTravelNotes(account) });
-  sendEvent(client, 'mail_load', database.getMails(account));
-  sendEvent(client, 'story_load', { stories: database.getStories(account), new_story_id: 0 });
-  sendEvent(client, 'misc_moment_load', { list: database.getMoments(account) });
-  sendEvent(client, 'encyclopedia_load', database.getEncyclopedia(account));
-  sendEvent(client, 'visit_load', database.getVisitorState(account, nowSeconds(), VISIT_SECONDS));
-  sendEvent(client, 'furniture_load_furniture', furniture.getState(account));
-  sendEvent(client, 'guest_load', guestProtocol(neighbors.state(account)));
-  sendEvent(client, 'furniture_load_tumbler', { show_index: 0, replace_index: 0, tumbler_list: [] });
-  sendEvent(client, 'furniture_load_compost', {
+  emit('album_load_recover', { pictures: database.getPostcards(account, 'recycle') });
+  emit('travel_load_gift', database.getGiftBox(account));
+  emit('travel_load_note', { note_list: database.getTravelNotes(account) });
+  emit('mail_load', database.getMails(account));
+  emit('story_load', { stories: database.getStories(account), new_story_id: 0 });
+  emit('misc_moment_load', { list: database.getMoments(account) });
+  emit('encyclopedia_load', database.getEncyclopedia(account));
+  emit('visit_load', database.getVisitorState(account, nowSeconds(), VISIT_SECONDS));
+  emit('furniture_load_furniture', furniture.getState(account));
+  emit('guest_load', guestProtocol(neighbors.state(account)));
+  emit('furniture_load_tumbler', { show_index: 0, replace_index: 0, tumbler_list: [] },true);
+  emit('furniture_load_compost', {
     show_index: 0, replace_index: 0, compost_list: [], state: 0, box_index: 0, box_list: [],
-  });
-  sendEvent(client, 'furniture_load_pocket', { show_index: 0, replace_index: 0, list: [], clover: 0 });
-  sendEvent(client, 'recharge_load', { water: 0, change: 0, field: [], sack: [] });
-  sendEvent(client, 'task_load', { tasks: [], list: [] });
-  sendEvent(client, 'task_load_list', { reward: [] });
-  sendEvent(client, 'share_load', { pic_list: [] });
-  sendEvent(client, 'pray_load_grays', []);
-  sendEvent(client, 'museum_load', { museum_list: [] });
-  sendEvent(client, 'wishingpool_load', {});
-  sendEvent(client, 'adsmgr_load', { can_pop: false, can_banner: false, day_left: 0, gift_id: 0, gift_time: 0, gift_can_get: 0, gift_get: 0, item_list: [] });
+  },true);
+  emit('furniture_load_pocket', { show_index: 0, replace_index: 0, list: [], clover: 0 },true);
+  emit('recharge_load', { water: 0, change: 0, field: [], sack: [] },true);
+  emit('task_load', { tasks: [], list: [] },true);
+  emit('task_load_list', { reward: [] },true);
+  emit('share_load', { pic_list: [] },true);
+  emit('pray_load_grays', [],true);
+  emit('museum_load', { museum_list: [] },true);
+  emit('wishingpool_load', {},true);
+  emit('adsmgr_load', { can_pop: false, can_banner: false, day_left: 0, gift_id: 0, gift_time: 0, gift_can_get: 0, gift_get: 0, item_list: [] });
+  for(const [cmd,data]of Object.entries(official?.protocols||{})){
+    if(sent.has(cmd)||cmd==='client_load_all_info'||cmd==='album_load_by_id_list'||!cmd.includes('load'))continue;
+    sendEvent(client,cmd,data);
+  }
 }
 
 function pushItemChanges(client, changes) {
@@ -257,6 +285,7 @@ function settleConnectedTrips() {
     }
   }
   for (const [account, accountClients] of accounts) {
+    if(database.isOfficialReadOnly(account))continue;
     const result = database.advanceTravel(account, TRAVEL_ROUTES, makePostcard);
     if (result) for (const client of accountClients) pushTravelCompletion(client, result);
     const made = furniture.advance(account);
@@ -269,7 +298,24 @@ function settleConnectedTrips() {
 function commandData(client, request) {
   const data = request.data || {};
   const account = client.account;
+  const official=database.getOfficialArchive(account);
+  if(official&&official.mode!=='active'&&!request.cmd.startsWith('hall_')&&request.cmd!=='client_hello'&&request.cmd!=='client_load_all_info'){
+    if(request.cmd==='album_load_by_id_list')return {pic_list:database.getPostcards(account,'album',data.id_list||[])};
+    if(request.cmd==='album_load')return {start:Number(data.start||1),total:database.countPostcards(account,'album'),pictures:database.getPostcards(account,'album',null,data.start||1,data.count||20)};
+    if(request.cmd.includes('load')&&Object.hasOwn(official.protocols,request.cmd))return official.protocols[request.cmd];
+    if(['client_confirm_event','travel_read_note','story_read_new_story','mail_read'].includes(request.cmd))return {code:0};
+    if(/^(client_set_|client_switch_)/.test(request.cmd))return {code:0};
+    return unsupported(client,request,'archive_readonly');
+  }
   switch (request.cmd) {
+    case 'client_load_role':return database.getRole(account);
+    case 'client_load_events':return database.getTravelEvents(account);
+    case 'client_load_all_info':
+    case 'client_set_ads':
+    case 'client_set_channel':
+    case 'client_set_channel_id':
+    case 'client_set_client_envinfo':
+    case 'hall_report_remote_addr':return {code:0};
     case 'furniture_load_furniture':
       return furniture.getState(account);
     case 'furniture_putin_bench':
@@ -516,17 +562,32 @@ function commandData(client, request) {
       return database.getCloverPlots(account);
     }
     default:
-      return { code: 0 };
+      if(request.cmd.includes('load')&&Object.hasOwn(official?.protocols||{},request.cmd)){
+        diagnostics.record(account,request.cmd,data,'snapshot_read_only');
+        return official.protocols[request.cmd];
+      }
+      return unsupported(client,request);
   }
 }
 
+function unsupported(client,request,reason='unimplemented'){
+  diagnostics.record(client.account,request.cmd,request.data||{},reason);
+  const last=client.unsupportedNotices ||= new Map(),now=Date.now();
+  if(now-(last.get(request.cmd)||0)>30000){
+    last.set(request.cmd,now);
+    sendEvent(client,'client_notice',{msg:`暂未支持此功能（${request.cmd}），已记录到服务器日志。`});
+  }
+  return {code:1,supported:false,message:'功能尚未实现，已记录',command:request.cmd};
+}
+
 function handleMessage(client, text) {
+  if (client.invalidated) return;
   let request;
   try { request = JSON.parse(text); } catch (_) { return; }
   if (!request || typeof request.cmd !== 'string') return;
   const cmd = request.cmd.replace('.', '_');
   request.cmd = cmd;
-  console.log(`[${client.remote}] ${cmd}${request.data ? ` ${JSON.stringify(request.data)}` : ''}`);
+  console.log(`[${client.remote}] ${cmd}${request.data ? ` ${JSON.stringify(describe(request.data))}` : ''}`);
   try {
     const response = commandData(client, request);
     if (cmd === 'client_load_all_info') {
@@ -616,6 +677,12 @@ const server = http.createServer(async (req, res) => {
           res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'private, max-age=3600', 'x-content-type-options': 'nosniff' }); res.end(bytes); return;
         }
         admin.requireAccount(account);
+        if (route === 'unsupported') {
+          sendHttpJson(res,200,{calls:diagnostics.list(account)}); return;
+        }
+        if (route === 'snapshots') {
+          sendHttpJson(res,200,admin.snapshots.list(account,url.searchParams.has('before')?Number(url.searchParams.get('before')):null)); return;
+        }
         if (route === 'garden') {
           sendHttpJson(res,200,{furniture:furniture.peekState(account),neighbor:neighbors.state(account),inventory:database.getItemState(account).house}); return;
         }
