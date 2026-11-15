@@ -2,11 +2,13 @@
 
 ## 服务
 
-`Dockerfile` 用 Node.js 24 构建，包含 Svelte 管理台及服务端，不包含游戏素材、数据库、管理密钥或 APK。`deploy/k8s.yaml` 创建独立 namespace、单实例 Deployment、Longhorn PVC、ConfigMap 和 ClusterIP Service，不创建 Ingress。SQLite 使用单副本和 Recreate 更新；数据库与素材都放在 `/data`，需另外备份持久卷。
+`Dockerfile` 提供两个构建目标：`server` 为 Node.js 24 游戏/API 服务，`management` 为独立 Nginx/Svelte 管理端。两个镜像均不包含游戏素材、数据库、管理密钥或 APK。`deploy/k8s.yaml` 在 `travel-frog` 命名空间创建两个 Deployment 和 Service；只有游戏服务挂载 Longhorn PVC，不创建 Ingress。SQLite 使用单副本和 Recreate 更新；数据库与素材都放在 `/data`，需另外备份持久卷。
 
 ```powershell
-docker build -t harbor.k8s.lan/library/travel-frog-server:0.9.0 .
-docker push harbor.k8s.lan/library/travel-frog-server:0.9.0
+docker build --target server -t harbor.k8s.lan/library/travel-frog-server:0.10.0 .
+docker build --target management -t harbor.k8s.lan/library/travel-frog-admin:0.10.0 .
+docker push harbor.k8s.lan/library/travel-frog-server:0.10.0
+docker push harbor.k8s.lan/library/travel-frog-admin:0.10.0
 ```
 
 实际实例已使用本机现有 Harbor 凭据；私有 registry 应另行配置专用 imagePullSecret。示例镜像放在现有公开 `library` 项目，仅含源码和运行时。
@@ -17,6 +19,8 @@ docker push harbor.k8s.lan/library/travel-frog-server:0.9.0
 
 迁移时菜农有 207 张图片记录、1749 草、2 券，共 2 个快照（含迁移前快照）。集群内已验证健康检查、管理端未登录拒绝、游戏密码登录、WebSocket 登录后读取菜农角色、SQLite 完整性。电脑上没有运行中的旧服务器；本地数据库保留为迁移备份，不与集群实时双向同步。
 
+v0.10 已部署两个镜像：`travel-frog-server:0.10.0` 和 `travel-frog-admin:0.10.0`。管理端 Service 为 `travel-frog-admin.travel-frog.svc.cluster.local:8080` / `10.106.181.173:8080`。游戏服务通过 `FROG_ADMIN_UI_ORIGIN` 转发 `/admin/` 到管理容器，因此原有公网 `/admin/` 地址继续可用；管理容器的 `/auth/`、`/api/` 和 WebSocket 又转发回游戏服务，所有管理写入与 OAuth 校验仍在唯一后端完成，不共享挂载 SQLite。升级前已在 `/data/backups/pre-0.10-*.sqlite` 创建一致性备份。
+
 雷池/已有反向代理需要为 `travelfrog.caiw.pp.ua:8133` 添加上游 `http://travel-frog.travel-frog.svc.cluster.local:8080`（在集群网络外使用 Service ClusterIP），启用 WebSocket Upgrade，设置合理长连接超时并保留原始 Origin。外部 TLS 在代理终止，客户端使用 HTTPS / WSS。服务不信任代理提供的身份头，也不接受 OAuth 模式下的旧 Bearer 管理密钥。
 
 ## Authentik 客户端设置
@@ -25,7 +29,7 @@ docker push harbor.k8s.lan/library/travel-frog-server:0.9.0
 
 | 字段 | 值 |
 | --- | --- |
-| Application 名称 / slug | 青蛙邮局 / `travel-frog` |
+| Application 名称 / slug | 青蛙邮局 / `travel-frog-admin`（实际已创建） |
 | Client type | Confidential |
 | Client ID | `travel-frog-admin` |
 | Client secret | 使用已部署 Secret 中的值，或填入新值后更新 Secret |
@@ -34,9 +38,9 @@ docker push harbor.k8s.lan/library/travel-frog-server:0.9.0
 | Signing key | 选择 RSA 签名密钥（RS256） |
 | Launch URL | `https://travelfrog.caiw.pp.ua:8133/admin/` |
 
-建立 `travel-frog-admins` 用户组，将允许管理此服的用户加入该组，建议同时给 Application 加对应组的访问绑定。若自定义 scope，需通过同名 `groups` 字段返回组名。也可用 `FROG_OIDC_ALLOWED_SUBJECTS` 配置明确的 OIDC sub 白名单。
+部署允许 `travel-frog-admins` 或 `authentik Admins` 用户组。专用组在本次检查时尚未创建；现有 Authentik 管理员可以直接进入，其他需要授权的用户请加入专用组，并同步检查 Application 的访问绑定。若自定义 scope，需通过同名 `groups` 字段返回组名。也可用 `FROG_OIDC_ALLOWED_SUBJECTS` 配置明确的 OIDC sub 白名单。
 
-Discovery URL：`https://auth.caiw.pp.ua:8133/application/o/travel-frog/.well-known/openid-configuration`。使用授权码、PKCE S256、state、nonce 和 ID Token 签名检查，服务端兑换令牌；浏览器仅得到 HttpOnly/Secure/SameSite=Lax 会话 Cookie，默认有效 12 小时。管理写请求另验证 Origin 和 CSRF token。会话存储在 SQLite，刷新网页及重启服务后仍有效；退出清除本应用会话，不退出其他 Authentik 应用。
+Discovery URL：`https://auth.caiw.pp.ua:8133/application/o/travel-frog-admin/.well-known/openid-configuration`。本次已将专用 Provider 设置为严格匹配回调，选择现有 RSA 签名证书，并将 Kubernetes Secret 同步为用户配置的实际 Client Secret。发现文档与授权跳转已从运行容器验证通过。使用授权码、PKCE S256、state、nonce 和 ID Token 签名检查，服务端兑换令牌；浏览器仅得到 HttpOnly/Secure/SameSite=Lax 会话 Cookie，默认有效 12 小时。管理写请求另验证 Origin 和 CSRF token。会话存储在 SQLite，刷新网页及重启服务后仍有效；退出清除本应用会话，不退出其他 Authentik 应用。
 
 读取已部署的客户端 Secret（仅在自己的终端执行，不粘贴到 Git）：
 
@@ -48,9 +52,11 @@ kubectl -n travel-frog get secret travel-frog-oidc -o jsonpath='{.data.FROG_OIDC
 
 ## 游戏账号密码
 
-部署开启 `FROG_GAME_AUTH_REQUIRED=1`，游戏先通过 `/api/game/login` 验证账号密码，再使用有效期 24 小时的随机令牌登录 WebSocket。用户名关联一个存档，密码以带独立盐的 scrypt 摘要保存；令牌只保存 SHA-256 摘要，重置密码会撤销该存档已有令牌。每次打开 APK 显示登录表单，不保存明文密码。
+部署开启 `FROG_GAME_AUTH_REQUIRED=1`，游戏先通过 `/api/game/login` 验证账号密码，再使用有效期 24 小时的随机令牌登录 WebSocket。用户名关联一个存档，密码以带独立盐的 scrypt 摘要保存，令牌只保存 SHA-256 摘要。v0.10 同时返回续期凭据，30 天不使用后过期；Android 只在应用私有 SharedPreferences 保存续期凭据，冷启动通过 `/api/game/refresh` 自动恢复登录，不保存明文密码。密码重置、禁用、撤销会话或删除登录账号都会撤销该登录名的全部访问/续期凭据，不影响共用存档的其他登录名。
 
-管理台选择账号后，在“存档管理 → 游戏账号密码”创建/重置登录名和密码。首次部署的登录名为 `dog`，关联 `official-14762366`（菜农）；初始随机密码只放在本地 `exports/deployment-20261116/credentials.txt`，不放进镜像、APK 或 Git。该 APK 共用的是集群中的菜农存档，操作会影响这份存档。
+管理台独立“账号管理”页支持列出登录名、关联存档、状态、最近登录和有效续期凭据数；可创建、重置密码、禁用/启用、退出所有设备，以及确认删除登录账号。删除仅移除登录权限，游戏存档保留。新存档仍通过侧栏创建，然后选择关联；多个登录名可共用同一存档。管理变更写入 `game_user_audit`，不记录密码、摘要或令牌；这些认证数据不随账号快照回档。
+
+首次部署的登录名为 `dog`，关联 `official-14762366`（菜农）；初始随机密码只放在本地 `exports/deployment-20261116/credentials.txt`，不放进镜像、APK 或 Git。该 APK 共用的是集群中的菜农存档，操作会影响这份存档。
 
 ## APK 构建
 
@@ -62,8 +68,9 @@ $env:FROG_APP_NAME='旅行青蛙·狗狗特供版'
 $env:FROG_SERVER_URL='wss://travelfrog.caiw.pp.ua:8133'
 $env:FROG_GAME_LOGIN='1'
 node build_local_client.js exports/dog-apk-build/decoded
+node build_native_login.js exports/dog-apk-build/decoded
 ```
 
-然后用 apktool 构建，用本地保存的专用 keystore 对齐并签名；后续升级必须使用同一签名。该包与官方版、本地 USB 版并存。服务器凭据和 OAuth Secret 不进入 APK，游戏静态资源随包提供，停用远端热更新。
+原生构建依赖见 [native-login.md](native-login.md)。然后用 apktool 构建，用本地保存的专用 keystore 对齐并签名；后续升级必须使用同一签名。新包 versionCode 为 22、最低 Android 5.0，与官方版、本地 USB 版并存。服务器凭据和 OAuth Secret 不进入 APK，游戏静态资源随包提供，停用远端热更新。已通过 adb 安装到 `c8e8d4e1` 并确认 Android 原生输入框、密码框和按钮可见，首次账号密码登录及重启进入游戏由用户继续实测。
 
 开发时默认仍兼容密钥登录及本地测试账号；启动 `start:admin` 并设置 `FROG_ADMIN_AUTH=oidc` 则不生成管理密钥。不要把本地测试模式当作部署配置。

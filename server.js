@@ -661,10 +661,10 @@ function readJsonBody(req) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if(await adminAuth.handle(req,res,url,sendHttpJson))return;
-  if(url.pathname==='/api/game/login'&&req.method==='POST'){
+  if(['/api/game/login','/api/game/refresh'].includes(url.pathname)&&req.method==='POST'){
     try{
       if(!(req.headers['content-type']||'').startsWith('application/json'))throw Error('Expected application/json');
-      const body=await readJsonBody(req);const result=await gameAuth.login(body.username,body.password,req.socket.remoteAddress);
+      const body=await readJsonBody(req);const result=url.pathname.endsWith('/refresh')?gameAuth.refresh(body.refresh_token):await gameAuth.login(body.username,body.password,req.socket.remoteAddress);
       sendHttpJson(res,200,result);
     }catch(e){sendHttpJson(res,401,{error:e.message});}return;
   }
@@ -689,6 +689,7 @@ const server = http.createServer(async (req, res) => {
       const route = url.pathname.slice('/api/admin/'.length);
       const account = url.searchParams.get('account');
       if (req.method === 'GET') {
+        if(route==='game-users'){sendHttpJson(res,200,{users:gameAuth.list(),accounts:database.getAccounts().map(({account,frog_name})=>({account,frog_name}))});return;}
         if (route === 'status') {
           sendHttpJson(res, 200, { version: require('./package.json').version, schema: database.db.prepare('PRAGMA user_version').get().user_version,
             accounts: database.getAccounts().length, online: [...clients].filter(x => x.synced).length, catalog: catalog.available }); return;
@@ -728,6 +729,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST') {
         if (!(req.headers['content-type'] || '').startsWith('application/json')) throw Error('Expected application/json');
+        if(route==='game-users'){sendHttpJson(res,200,gameAuth.manage(await readJsonBody(req),adminAuth.mode==='oidc'?adminAuth.session(req).user.sub:'token-admin'));return;}
         if(route==='game-credentials'){
           admin.requireAccount(account);const body=await readJsonBody(req);
           const result=gameAuth.setPassword(body.username,body.password,account);
@@ -775,6 +777,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === 'GET' && (url.pathname === '/admin' || url.pathname.startsWith('/admin/'))) {
+    if(process.env.FROG_ADMIN_UI_ORIGIN){
+      const target=new URL(url.pathname+url.search,process.env.FROG_ADMIN_UI_ORIGIN);
+      const outgoing=http.request(target,{method:'GET',headers:{host:req.headers.host||target.host}},upstream=>{res.writeHead(upstream.statusCode,upstream.headers);upstream.pipe(res);});
+      outgoing.setTimeout(15000,()=>outgoing.destroy());outgoing.on('error',()=>{if(!res.headersSent)sendHttpJson(res,502,{error:'管理界面暂时不可用'});else res.destroy();});outgoing.end();return;
+    }
     const relative = url.pathname.replace(/^\/admin\/?/, '') || 'index.html';
     const filename = path.resolve(UI_ROOT, relative);
     if (!filename.startsWith(UI_ROOT + path.sep) || !fs.existsSync(filename) || !fs.statSync(filename).isFile()) {

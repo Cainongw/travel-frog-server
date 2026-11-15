@@ -1,6 +1,6 @@
 # 实现范围与后续工作
 
-本文以当前服务端与 `admin-ui/src` 为准。项目版本为 0.9.0，SQLite 游戏 schema 与 JSON 导出格式为 v6，仍接受 v1–v5 导入；管理快照另有带完整性校验的内部格式。它是基于客户端协议实现的本地服务器；客户端能打开某个页面、收到 `{code:0}`，并不证明对应玩法已经实现。
+本文以当前服务端与 `admin-ui/src` 为准。项目版本为 0.10.0，SQLite 游戏 schema 与 JSON 导出格式为 v6，仍接受 v1–v5 导入；管理快照另有带完整性校验的内部格式。它是基于客户端协议实现的本地服务器；客户端能打开某个页面、收到 `{code:0}`，并不证明对应玩法已经实现。
 
 APK 配置包含图片、物品、笔记和奖项定义，不能据此恢复玩家的官方账号进度。管理台管理的是当前服务器的 SQLite 数据；将真实存档迁入仍需先取得真实数据，再转换成相应记录。
 
@@ -43,6 +43,8 @@ APK 的 `MainOutView.updateVisitorGift()` 在 `expire_time <= serverTime` 时显
 `item.gacha` 的回包字段 `ticket` 则表示颜色编号 0–5，不是券余额。它有 session 回包，自动触发客户端抽奖事件，不应再推送同名事件播放第二次。
 
 ## Svelte 管理台与管理 API
+
+v0.10 增加独立管理 Docker 镜像/Deployment/Service，保留原公网管理路径；独立账号管理页支持登录名与存档关联、创建、密码重置、禁用、撤销会话、删除登录名并保留存档。Android 原生登录 Activity 保存续期凭据，在 30 天不活跃期限内自动恢复，替换每次打开都输入密码的游戏画布表单。账号管理、续期与审计表不随游戏快照回档。见 [native-login.md](native-login.md)。
 
 v0.9 增加 Authentik/OIDC 管理登录（授权码、PKCE、nonce、签名验证、用户组授权、HttpOnly Cookie、CSRF）与游戏账号密码（scrypt、限频、24 小时随机令牌）。部署模式强制密码登录；默认本地开发仍兼容 TestChannel 和管理密钥。OAuth 会话、凭据、游戏令牌属于认证数据，不进入账号快照或导出。单副本 Docker/k8s 部署及接入说明见 [deployment.md](deployment.md)。
 

@@ -4,11 +4,11 @@
   import Postcard from './Postcard.svelte';
   import Garden from './Garden.svelte';
   import Snapshots from './Snapshots.svelte';
+  import GameAccounts from './GameAccounts.svelte';
 
   let secret = '';
   let auth = {mode:'token',configured:false};
-  let gameUsername='';
-  let gamePassword='';
+  let gameAccounts;
   let connected = false;
   let busy = false;
   let loadingAccount = false;
@@ -64,6 +64,7 @@
     { id: 'garden', label: '庭院与制造', mark: '04' },
     { id: 'archive', label: '存档管理', mark: '05' },
     { id: 'activity', label: '操作记录', mark: '06' },
+    { id: 'game-accounts', label: '账号管理', mark: '07' },
   ];
   const companions = [{ id: -1, name: '独自旅行' }, { id: 0, name: '壁虎同行' }, { id: 1, name: '刺猬同行' }, { id: 2, name: '萤火虫同行' }];
   const actionNames = { create: '创建账号', postcards: '下发明信片', mail: '寄送奖励邮件', role: '修改角色', weather: '设置天气', notes: '解锁笔记', import: '导入存档', 'visitor-depart': '访客离场', 'furniture-put': '放入工作台', 'furniture-take': '取出工作台物品', 'furniture-buy': '购买家具商品', 'furniture-replace': '摆放家具', 'furniture-advance': '检查制造进度', 'furniture-finish': '立即完成制造', 'neighbor-arrive': '邻居来访', 'neighbor-depart': '邻居离场' };
@@ -137,6 +138,7 @@
       const [state, list] = await Promise.all([api('status'), api('accounts')]);
       status = state; accounts = list.accounts;
       if (selected) await loadAccount(selected);
+      if (tab === 'game-accounts') await gameAccounts?.refresh();
       notice = '已获取服务器最新状态。';
     } catch (e) { error = e.message; } finally { busy = false; }
   }
@@ -243,7 +245,7 @@
     <aside class="sidebar">
       <div class="brand"><span class="brand-symbol">蛙</span><span>青蛙邮局<small>管理台 / POSTMASTER</small></span></div>
       <div class="sidebar-section"><span>管理导航</span><small>WORKSPACE</small></div>
-      <nav aria-label="管理导航">{#each tabs as entry}<button class:active={tab === entry.id} onclick={() => tab = entry.id}><span>{entry.mark}</span>{entry.label}{#if tab === entry.id}<b>●</b>{/if}</button>{/each}</nav>
+      <nav aria-label="管理导航">{#each tabs as entry}<button class:active={tab === entry.id} disabled={busy || loadingAccount} onclick={() => tab = entry.id}><span>{entry.mark}</span>{entry.label}{#if tab === entry.id}<b>●</b>{/if}</button>{/each}</nav>
       <div class="sidebar-section"><span>青蛙档案</span><small>{accounts.length} 个账号</small></div>
       <label class="search-label"><span class="sr-only">搜索账号</span><input class="search" placeholder="搜索蛙名或账号…" bind:value={search} /></label>
       <div class="account-list">{#each visibleAccounts as account}<button class:selected={selected === account.account} disabled={busy || loadingAccount} onclick={() => { clearMessages(); loadAccount(account.account); }}><span class="avatar">{(account.frog_name || '蛙').slice(0, 1)}</span><span><strong>{account.frog_name}</strong><small>{account.account}</small></span><span class:online={account.online} class="presence" title={account.online ? '在线' : '离线'}></span></button>{:else}<p class="muted empty-small">{accounts.length ? '没有匹配的账号' : '邮局还没有账号'}</p>{/each}</div>
@@ -256,7 +258,8 @@
       {#if error}<div class="notice error" role="alert">{error}<button class="text-button" onclick={() => error = ''}>关闭</button></div>{/if}
       {#if notice}<div class="notice success" role="status">{notice}<button class="text-button" onclick={() => notice = ''}>关闭</button></div>{/if}
       {#if !catalog.available}<div class="notice warning">APK 资源目录尚未配置，明信片、物品与笔记目录暂不可用。请在服务器设置 FROG_ASSETS。</div>{/if}
-      {#if loadingAccount}<section class="empty-state"><div class="spinner"></div><h2>正在打开蛙的档案…</h2></section>
+      {#if tab === 'game-accounts'}<GameAccounts bind:this={gameAccounts} bind:busy {selected} />
+      {:else if loadingAccount}<section class="empty-state"><div class="spinner"></div><h2>正在打开蛙的档案…</h2></section>
       {:else if !snapshot}<section class="empty-state"><span class="empty-illustration">✉</span><h2>先选一位旅人</h2><p>从左侧选择账号，或创建一个新的本地账号。</p></section>
       {:else}
         <div class="recipient-bar"><span class="avatar">{snapshot.account.frog_name.slice(0, 1)}</span><div><strong>{snapshot.account.frog_name}</strong><code>{selected}</code></div><span class:connected={currentAccount?.online} class="tag">{currentAccount?.online ? '客户端在线' : '客户端离线'}</span><span class="recipient-note">当前所有操作将应用于此账号</span></div>
@@ -284,7 +287,6 @@
             <section class="panel"><div class="panel-heading"><h2>邮箱记录</h2><span>{snapshot.mails.length} 封</span></div><div class="mail-list">{#each snapshot.mails as mail}<article><div><span class="mail-icon">✉</span><h3>{mail.title}</h3><span class="tag">{mail.opened ? '已领取' : mail.read ? '已读' : '未读'}</span></div><p>{mail.message}</p><small>{date(mail.timestamp)} · 草 {mail.resource?.clover_point || 0} / 券 {mail.resource?.ticket || 0}{mail.pictures?.length ? ' / 明信片 ' + mail.pictures.length : ''}</small></article>{:else}<div class="empty-small">还没有邮件。</div>{/each}</div></section></div>
         {:else if tab === 'archive'}
           <Snapshots account={selected} page={snapshotPage} {busy} onAction={mutate} />
-          <section class="panel"><div class="panel-heading"><h2>游戏账号密码</h2><span>GAME LOGIN</span></div><p class="muted">登录账号关联当前存档。设置后原游戏会话失效，需重新输入密码登录。</p><form onsubmit={async event=>{event.preventDefault();const result=await mutate('game-credentials',{username:gameUsername,password:gamePassword},'游戏登录信息已保存。');if(result)gamePassword='';}}><label>登录账号<input bind:value={gameUsername} pattern="[a-zA-Z0-9_.@-]{3,64}" required autocomplete="username" /></label><label>新密码<input type="password" bind:value={gamePassword} minlength="10" maxlength="128" required autocomplete="new-password" /></label><button class="secondary" disabled={busy}>保存游戏账号密码</button></form></section>
           <div class="two-columns"><section class="panel"><div class="panel-heading"><h2>保存一份回忆</h2><span>EXPORT</span></div><p class="muted">导出当前账号的完整私服存档，包括相册、背包、旅行、笔记和邮件。JSON 可用于迁移或恢复。</p><button class="primary" onclick={() => exportSave()} disabled={busy}>↓ 下载存档 JSON</button><p class="footnote">这是当前私服的存档，不会从官方账号自动读取历史进度。</p></section><section class="panel"><div class="panel-heading"><h2>导入存档</h2><span>RESTORE</span></div><p class="muted">导入会替换当前账号数据。服务器会先保存自动备份，可在操作记录中下载。</p><label class="file-picker">选择 JSON 文件<input type="file" accept=".json,application/json" onchange={chooseImport} disabled={busy} /></label>{#if importSave}<form onsubmit={importArchive}><div class="import-summary"><strong>{importName}</strong><small>v{importSave.version} · {importSave.postcards?.length || 0} 张明信片 · {importSave.account.frog_name}</small></div><label>输入账号 {selected} 确认替换<input bind:value={importConfirm} autocomplete="off" required /></label><label class="checkbox"><input type="checkbox" bind:checked={importAcknowledged} />我确认用此文件替换所选账号的存档</label><button class="danger" disabled={busy || importConfirm !== selected || !importAcknowledged}>确认替换存档</button></form>{/if}</section></div>
           <section class="panel"><div class="panel-heading"><h2>明信片档案</h2><label><span class="sr-only">相册范围</span><select bind:value={albumLocation}><option value="all">全部位置</option>{#each Object.entries(locations) as [key, value]}<option value={key}>{value}</option>{/each}</select></label></div>{#if previewAlbum}<div class="album-preview"><Postcard picture={previewAlbum} compact /><button class="text-button" onclick={() => previewAlbum = null}>收起预览</button></div>{/if}<div class="table-wrap"><table><thead><tr><th>记录编号</th><th>图片编号</th><th>所在位置</th><th>图层</th><th>操作</th></tr></thead><tbody>{#each album as picture}<tr><td>#{picture.id}</td><td>{picture.pic_id}</td><td><span class="tag">{locations[picture.location] || picture.location}</span></td><td>{picture.layers.length}</td><td><button class="text-button" onclick={() => previewAlbum = picture}>预览</button></td></tr>{:else}<tr><td colspan="5" class="empty-small">这里暂时没有明信片。</td></tr>{/each}</tbody></table></div></section>
           <section class="panel"><div class="panel-heading"><h2>背包与库存</h2><span>INVENTORY</span></div><p class="muted">背包：{snapshot.items.bag.map(id => id < 0 ? '空' : catalog.items.find(x => x.id === id)?.name || '#' + id).join(' / ')}</p><div class="inventory-grid">{#each snapshot.items.house as item}<div><span>{catalog.items.find(x => x.id === item.item_id)?.name || '#' + item.item_id}</span><strong>× {item.count}</strong></div>{:else}<p class="muted">库存为空。</p>{/each}</div></section>

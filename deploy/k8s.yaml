@@ -23,11 +23,12 @@ metadata:
 data:
   FROG_ADMIN_AUTH: oidc
   FROG_PUBLIC_URL: https://travelfrog.caiw.pp.ua:8133
-  FROG_OIDC_DISCOVERY_URL: https://auth.caiw.pp.ua:8133/application/o/travel-frog/.well-known/openid-configuration
-  FROG_OIDC_ALLOWED_GROUPS: travel-frog-admins
+  FROG_OIDC_DISCOVERY_URL: https://auth.caiw.pp.ua:8133/application/o/travel-frog-admin/.well-known/openid-configuration
+  FROG_OIDC_ALLOWED_GROUPS: travel-frog-admins,authentik Admins
   FROG_ALLOW_REMOTE_GAME: '1'
   FROG_GAME_AUTH_REQUIRED: '1'
   FROG_ASSETS: /data/assets
+  FROG_ADMIN_UI_ORIGIN: http://travel-frog-admin:8080
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -52,7 +53,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: server
-        image: harbor.k8s.lan/library/travel-frog-server:0.9.0
+        image: harbor.k8s.lan/library/travel-frog-server:0.10.0
         imagePullPolicy: Always
         ports:
         - name: http
@@ -94,6 +95,50 @@ metadata:
 spec:
   selector:
     app: travel-frog
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: travel-frog-admin
+  namespace: travel-frog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: travel-frog-admin
+  template:
+    metadata:
+      labels:
+        app: travel-frog-admin
+    spec:
+      containers:
+      - name: admin
+        image: harbor.k8s.lan/library/travel-frog-admin:0.10.0
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+        livenessProbe:
+          httpGet: {path: /health, port: http}
+        resources:
+          requests: {cpu: 20m, memory: 32Mi}
+          limits: {cpu: 500m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: travel-frog-admin
+  namespace: travel-frog
+spec:
+  selector:
+    app: travel-frog-admin
   ports:
   - name: http
     port: 8080

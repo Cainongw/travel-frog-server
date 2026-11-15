@@ -1,5 +1,8 @@
 *
 !Dockerfile
+!deploy/
+deploy/*
+!deploy/admin-nginx.conf
 !package.json
 !package-lock.json
 !*.js
