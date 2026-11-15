@@ -1,6 +1,6 @@
 # 实现范围与后续工作
 
-本文以当前 `server.js`、`database.js`、`gameplay.js`、`furniture.js`、`neighbors.js`、`admin.js`、`snapshots.js`、`protocol_diagnostics.js`、`catalog.js` 和 `admin-ui/src` 为准。项目版本为 0.8.0，SQLite 游戏 schema 与 JSON 导出格式为 v6，仍接受 v1–v5 导入；管理快照另有带完整性校验的内部格式。它是基于客户端协议实现的本地服务器；客户端能打开某个页面、收到 `{code:0}`，并不证明对应玩法已经实现。
+本文以当前服务端与 `admin-ui/src` 为准。项目版本为 0.9.0，SQLite 游戏 schema 与 JSON 导出格式为 v6，仍接受 v1–v5 导入；管理快照另有带完整性校验的内部格式。它是基于客户端协议实现的本地服务器；客户端能打开某个页面、收到 `{code:0}`，并不证明对应玩法已经实现。
 
 APK 配置包含图片、物品、笔记和奖项定义，不能据此恢复玩家的官方账号进度。管理台管理的是当前服务器的 SQLite 数据；将真实存档迁入仍需先取得真实数据，再转换成相应记录。
 
@@ -44,6 +44,8 @@ APK 的 `MainOutView.updateVisitorGift()` 在 `expire_time <= serverTime` 时显
 
 ## Svelte 管理台与管理 API
 
+v0.9 增加 Authentik/OIDC 管理登录（授权码、PKCE、nonce、签名验证、用户组授权、HttpOnly Cookie、CSRF）与游戏账号密码（scrypt、限频、24 小时随机令牌）。部署模式强制密码登录；默认本地开发仍兼容 TestChannel 和管理密钥。OAuth 会话、凭据、游戏令牌属于认证数据，不进入账号快照或导出。单副本 Docker/k8s 部署及接入说明见 [deployment.md](deployment.md)。
+
 v0.8 新增手动账号快照与回档。`snapshots.js` 保存全部账号游戏表的原始行，并且直接事务恢复，不通过会填充默认值的普通 JSON 导入器。官方保全快照同样支持。恢复前保存当前状态的保护快照；恢复后在线连接失效，需重新连接。快照、管理审计和幂等历史不会被恢复过程删除。定时快照、删除/保留策略与全服务器配置快照不在本版范围。
 
 官方保全账号创建快照后自动进入 `active` 模式，已有快照可通过 `archive-activate` 启用。已有玩法读取和更新当前 SQLite 游戏表，原始采集记录仍完整保留；未实现的模块可展示原始记录，但不能继续结算。缺少本地旅行计时记录的官方旅行/聚会状态切回在家，不编造收益。回档到旧保全快照后同样启用玩法，保持可测试状态。快照创建/模式切换与审计在同一事务内，启用后旧客户端连接失效，需重进。
@@ -64,7 +66,7 @@ v0.7 新增庭院页：工作台物品放入/取出、配方缺额补给邮件�
 
 ### 远程管理与游戏网络隔离
 
-HTTP 管理可远程使用 Bearer 密钥。游戏 WebSocket 默认只接受 loopback 连接；设置 `FROG_ALLOW_REMOTE_GAME=1` 才允许直接远程游戏连接。该开关不为 TestChannel 增加玩家认证，因此不应把它理解为“开启安全公网游戏服”。
+HTTP 管理支持 OIDC 会话或开发用 Bearer 密钥。游戏 WebSocket 默认只接受 loopback 连接；设置 `FROG_ALLOW_REMOTE_GAME=1` 才允许直接远程游戏连接。该开关本身不增加玩家认证；部署示例还设置 `FROG_GAME_AUTH_REQUIRED=1`，要求先通过账号密码取得令牌。
 
 经反向代理部署时，Node 看到的对端可能是代理的 loopback 地址。公网代理应只发布管理台和管理 API，不转发游戏 WebSocket Upgrade。单靠 Node 的远端地址判断不能隔离经同一个本地代理转入的游戏连接。远程管理应使用 HTTPS 或可信隧道，避免在不受信任的网络明文传输管理密钥。
 

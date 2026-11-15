@@ -16,6 +16,8 @@ const { GameplayService } = require('./gameplay');
 const { FurnitureService } = require('./furniture');
 const { NeighborService, guestProtocol } = require('./neighbors');
 const { ProtocolDiagnostics, describe } = require('./protocol_diagnostics');
+const { AdminAuth } = require('./admin_auth');
+const { GameAuth } = require('./game_auth');
 
 const HOST = process.env.FROG_HOST || '0.0.0.0';
 const PORT = Number(process.env.FROG_PORT || 8080);
@@ -46,6 +48,9 @@ const furniture = new FurnitureService(database, catalog, {craftSeconds:Number(p
 const neighbors = new NeighborService(database, catalog, {durationSeconds:Number(process.env.FROG_NEIGHBOR_SECONDS || 1800),cooldownSeconds:Number(process.env.FROG_NEIGHBOR_COOLDOWN || 21600)});
 const admin = new AdminService(database, catalog, { furniture, neighbors });
 const diagnostics = new ProtocolDiagnostics(database);
+const adminAuth = new AdminAuth(database);
+const gameAuth = new GameAuth(database);
+const GAME_AUTH_REQUIRED = process.env.FROG_GAME_AUTH_REQUIRED === '1';
 const ADMIN_TOKEN = process.env.FROG_ADMIN_TOKEN || '';
 if (ADMIN_TOKEN && ADMIN_TOKEN.length < 24) throw Error('FROG_ADMIN_TOKEN must be at least 24 characters');
 const UI_ROOT = path.join(__dirname, 'admin-ui', 'dist');
@@ -343,11 +348,23 @@ function commandData(client, request) {
     case 'client_hello':
       return { timestamp: nowSeconds() };
     case 'hall_gen_token':
+      if(GAME_AUTH_REQUIRED){
+        const account=gameAuth.resolve(data.account);
+        if(!account)throw Error('请先使用账号密码登录');
+        client.account=account;client.token=data.account;
+        return {token:client.token};
+      }
       client.account = normalizeAccount(data.account);
       client.token = `local-${client.account}`;
       return { token: client.token };
     case 'hall_login':
     case 'hall_reconnect':
+      if(GAME_AUTH_REQUIRED){
+        const account=gameAuth.resolve(data.token);
+        if(!account)throw Error('登录已失效，请重新输入账号密码');
+        client.account=account;client.token=data.token;client.uid=database.ensureAccount(account).uid;client.authed=true;
+        return {code:0,account};
+      }
       client.token = String(data.token || client.token || 'local-guest');
       client.account = client.token.startsWith('local-') ? client.token.slice(6) : (client.account || 'guest');
       client.account = normalizeAccount(client.account);
@@ -587,6 +604,9 @@ function handleMessage(client, text) {
   if (!request || typeof request.cmd !== 'string') return;
   const cmd = request.cmd.replace('.', '_');
   request.cmd = cmd;
+  if(GAME_AUTH_REQUIRED&&!['client_hello','hall_gen_token','hall_login','hall_reconnect'].includes(cmd)&&(!client.authed||!gameAuth.resolve(client.token))){
+    sendResponse(client,request,{code:1,message:'请先登录'});return;
+  }
   console.log(`[${client.remote}] ${cmd}${request.data ? ` ${JSON.stringify(describe(request.data))}` : ''}`);
   try {
     const response = commandData(client, request);
@@ -640,16 +660,28 @@ function readJsonBody(req) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  if(await adminAuth.handle(req,res,url,sendHttpJson))return;
+  if(url.pathname==='/api/game/login'&&req.method==='POST'){
+    try{
+      if(!(req.headers['content-type']||'').startsWith('application/json'))throw Error('Expected application/json');
+      const body=await readJsonBody(req);const result=await gameAuth.login(body.username,body.password,req.socket.remoteAddress);
+      sendHttpJson(res,200,result);
+    }catch(e){sendHttpJson(res,401,{error:e.message});}return;
+  }
   if (url.pathname === '/health') {
     sendHttpJson(res, 200, { ok: true, version: require('./package.json').version });
     return;
   }
   if (url.pathname.startsWith('/api/')) {
+    if (adminAuth.mode==='oidc') {
+      if(!adminAuth.authorize(req)){sendHttpJson(res,401,{error:'请通过 Authentik 登录，或刷新页面后重试。'});return;}
+    } else {
     if (url.pathname.startsWith('/api/admin/') && !ADMIN_TOKEN) {
       sendHttpJson(res, 503, { error: '请设置 FROG_ADMIN_TOKEN（至少 24 字符）后重启服务器' }); return;
     }
     if (ADMIN_TOKEN ? !hasAdminToken(req) : !isLoopback(req.socket.remoteAddress) || !!req.headers.origin) {
       sendHttpJson(res, 401, { error: 'Invalid or missing management token' }); return;
+    }
     }
   }
   try {
@@ -696,6 +728,11 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST') {
         if (!(req.headers['content-type'] || '').startsWith('application/json')) throw Error('Expected application/json');
+        if(route==='game-credentials'){
+          admin.requireAccount(account);const body=await readJsonBody(req);
+          const result=gameAuth.setPassword(body.username,body.password,account);
+          sendHttpJson(res,200,{ok:true,...result});return;
+        }
         const result = admin.mutate(account, route, await readJsonBody(req), req.headers['idempotency-key']);
         pushAdminResult(result);
         sendHttpJson(res, 200, result); return;

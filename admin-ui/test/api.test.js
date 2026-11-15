@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { api, setToken } from '../src/api.js';
+import { api, setToken, setSession } from '../src/api.js';
+
+test('OAuth requests use the session cookie and CSRF token without a Bearer key',async t=>{
+  const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;setSession('');});
+  setSession('session-csrf');let headers;
+  globalThis.fetch=async(url,options)=>{headers=options.headers;return Response.json({ok:true});};
+  await api('role','frog',{body:{clover:10}});
+  assert.equal(headers['X-CSRF-Token'],'session-csrf');assert.equal(headers.Authorization,undefined);
+});
 
 test('requests use a header token and encoded account without persisting credentials', async t => {
   const original = globalThis.fetch;

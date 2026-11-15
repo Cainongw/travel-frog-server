@@ -1,10 +1,14 @@
 <script>
-  import { api, setToken, downloadJson } from './api.js';
+  import { onMount } from 'svelte';
+  import { api, setToken, setSession, authSession, downloadJson } from './api.js';
   import Postcard from './Postcard.svelte';
   import Garden from './Garden.svelte';
   import Snapshots from './Snapshots.svelte';
 
   let secret = '';
+  let auth = {mode:'token',configured:false};
+  let gameUsername='';
+  let gamePassword='';
   let connected = false;
   let busy = false;
   let loadingAccount = false;
@@ -84,9 +88,12 @@
   $: album = (snapshot?.postcards || []).filter(x => albumLocation === 'all' || x.location === albumLocation);
 
   function clearMessages() { error = ''; notice = ''; }
+  onMount(async()=>{
+    try{auth=await authSession();if(auth.authenticated){setSession(auth.csrf);await login();}}catch(e){error=e.message;}
+  });
   async function login(event) {
-    event.preventDefault();
-    clearMessages(); busy = true; setToken(secret.trim());
+    event?.preventDefault();
+    clearMessages(); busy = true; if(auth.mode!=='oidc')setToken(secret.trim());
     try {
       const [state, data, list] = await Promise.all([api('status'), api('catalog'), api('accounts')]);
       status = state; catalog = data; accounts = list.accounts; connected = true; secret = '';
@@ -97,7 +104,12 @@
     } catch (e) { error = e.message; setToken(''); }
     finally { busy = false; }
   }
-  function logout() {
+  async function logout() {
+    if(auth.mode==='oidc'){
+      const response=await fetch('/auth/logout',{method:'POST',headers:{'X-CSRF-Token':auth.csrf}});
+      if(!response.ok){error='退出失败，请重试。';return;}
+      setSession('');window.location.assign('/admin/');return;
+    }
     requestVersion++; connected = false; setToken(''); snapshot = null; garden = null; selected = ''; accounts = [];
     catalog = { items: [], templates: [], notes: [], pictures: [], resources: {} };
     importSave = null; importName = ''; importConfirm = ''; importAcknowledged = false; clearMessages();
@@ -212,12 +224,17 @@
     <section class="login-card">
       <span class="eyebrow">POSTMASTER ACCESS</span><h2>进入管理台</h2>
       <p class="muted">连接当前服务器，开始管理你的青蛙档案。</p>
-      <form onsubmit={login}>
+      {#if auth.mode==='oidc'}
+        <p class="muted">使用统一身份登录管理青蛙档案。</p>
+        {#if !auth.configured}<p class="notice">尚未配置 Authentik 客户端，请按部署说明设置。</p>{/if}
+        {#if error}<p class="notice error" role="alert">{error}</p>{/if}
+        <a class="primary wide" href="/auth/login">通过 Authentik 登录 →</a>
+      {:else}<form onsubmit={login}>
         <label>管理密钥<input type="password" bind:value={secret} autocomplete="off" placeholder="输入 FROG_ADMIN_TOKEN" minlength="24" required disabled={busy} /></label>
         <small>密钥仅保留在本次页面内存中，刷新页面后需重新输入。</small>
         {#if error}<p class="notice error" role="alert">{error}</p>{/if}
         <button class="primary wide" disabled={busy}>{busy ? '正在连接…' : '连接邮局'}<span>→</span></button>
-      </form>
+      </form>{/if}
       <div class="server-address"><span class="dot"></span>同源连接 <code>{typeof window !== 'undefined' ? window.location.host : ''}</code></div>
     </section>
   </main>
@@ -267,6 +284,7 @@
             <section class="panel"><div class="panel-heading"><h2>邮箱记录</h2><span>{snapshot.mails.length} 封</span></div><div class="mail-list">{#each snapshot.mails as mail}<article><div><span class="mail-icon">✉</span><h3>{mail.title}</h3><span class="tag">{mail.opened ? '已领取' : mail.read ? '已读' : '未读'}</span></div><p>{mail.message}</p><small>{date(mail.timestamp)} · 草 {mail.resource?.clover_point || 0} / 券 {mail.resource?.ticket || 0}{mail.pictures?.length ? ' / 明信片 ' + mail.pictures.length : ''}</small></article>{:else}<div class="empty-small">还没有邮件。</div>{/each}</div></section></div>
         {:else if tab === 'archive'}
           <Snapshots account={selected} page={snapshotPage} {busy} onAction={mutate} />
+          <section class="panel"><div class="panel-heading"><h2>游戏账号密码</h2><span>GAME LOGIN</span></div><p class="muted">登录账号关联当前存档。设置后原游戏会话失效，需重新输入密码登录。</p><form onsubmit={async event=>{event.preventDefault();const result=await mutate('game-credentials',{username:gameUsername,password:gamePassword},'游戏登录信息已保存。');if(result)gamePassword='';}}><label>登录账号<input bind:value={gameUsername} pattern="[a-zA-Z0-9_.@-]{3,64}" required autocomplete="username" /></label><label>新密码<input type="password" bind:value={gamePassword} minlength="10" maxlength="128" required autocomplete="new-password" /></label><button class="secondary" disabled={busy}>保存游戏账号密码</button></form></section>
           <div class="two-columns"><section class="panel"><div class="panel-heading"><h2>保存一份回忆</h2><span>EXPORT</span></div><p class="muted">导出当前账号的完整私服存档，包括相册、背包、旅行、笔记和邮件。JSON 可用于迁移或恢复。</p><button class="primary" onclick={() => exportSave()} disabled={busy}>↓ 下载存档 JSON</button><p class="footnote">这是当前私服的存档，不会从官方账号自动读取历史进度。</p></section><section class="panel"><div class="panel-heading"><h2>导入存档</h2><span>RESTORE</span></div><p class="muted">导入会替换当前账号数据。服务器会先保存自动备份，可在操作记录中下载。</p><label class="file-picker">选择 JSON 文件<input type="file" accept=".json,application/json" onchange={chooseImport} disabled={busy} /></label>{#if importSave}<form onsubmit={importArchive}><div class="import-summary"><strong>{importName}</strong><small>v{importSave.version} · {importSave.postcards?.length || 0} 张明信片 · {importSave.account.frog_name}</small></div><label>输入账号 {selected} 确认替换<input bind:value={importConfirm} autocomplete="off" required /></label><label class="checkbox"><input type="checkbox" bind:checked={importAcknowledged} />我确认用此文件替换所选账号的存档</label><button class="danger" disabled={busy || importConfirm !== selected || !importAcknowledged}>确认替换存档</button></form>{/if}</section></div>
           <section class="panel"><div class="panel-heading"><h2>明信片档案</h2><label><span class="sr-only">相册范围</span><select bind:value={albumLocation}><option value="all">全部位置</option>{#each Object.entries(locations) as [key, value]}<option value={key}>{value}</option>{/each}</select></label></div>{#if previewAlbum}<div class="album-preview"><Postcard picture={previewAlbum} compact /><button class="text-button" onclick={() => previewAlbum = null}>收起预览</button></div>{/if}<div class="table-wrap"><table><thead><tr><th>记录编号</th><th>图片编号</th><th>所在位置</th><th>图层</th><th>操作</th></tr></thead><tbody>{#each album as picture}<tr><td>#{picture.id}</td><td>{picture.pic_id}</td><td><span class="tag">{locations[picture.location] || picture.location}</span></td><td>{picture.layers.length}</td><td><button class="text-button" onclick={() => previewAlbum = picture}>预览</button></td></tr>{:else}<tr><td colspan="5" class="empty-small">这里暂时没有明信片。</td></tr>{/each}</tbody></table></div></section>
           <section class="panel"><div class="panel-heading"><h2>背包与库存</h2><span>INVENTORY</span></div><p class="muted">背包：{snapshot.items.bag.map(id => id < 0 ? '空' : catalog.items.find(x => x.id === id)?.name || '#' + id).join(' / ')}</p><div class="inventory-grid">{#each snapshot.items.house as item}<div><span>{catalog.items.find(x => x.id === item.item_id)?.name || '#' + item.item_id}</span><strong>× {item.count}</strong></div>{:else}<p class="muted">库存为空。</p>{/each}</div></section>

@@ -10,7 +10,7 @@ if(!process.env.FROG_ASSETS&&fs.existsSync(assetConfig))process.env.FROG_ASSETS=
 // FROG_HOST=0.0.0.0 explicitly enables remote HTTP management.
 const tokenFile = path.join(__dirname, 'data', 'admin.token');
 fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
-if (!process.env.FROG_ADMIN_TOKEN) {
+if (process.env.FROG_ADMIN_AUTH!=='oidc' && !process.env.FROG_ADMIN_TOKEN) {
   if (!fs.existsSync(tokenFile)) fs.writeFileSync(tokenFile, crypto.randomBytes(32).toString('hex'), { flag: 'wx', mode: 0o600 });
   process.env.FROG_ADMIN_TOKEN = fs.readFileSync(tokenFile, 'utf8').trim();
   console.log(`Management token file: ${tokenFile}`);

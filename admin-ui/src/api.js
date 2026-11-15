@@ -1,4 +1,7 @@
 let token = '';
+let csrf = '';
+export function setSession(value) { csrf=value||''; setToken(''); }
+export async function authSession(){return fetch('/auth/session',{credentials:'same-origin',cache:'no-store'}).then(r=>r.json());}
 const pending = new Map();
 const images = new Map();
 
@@ -21,7 +24,8 @@ export async function api(route, account, options = {}) {
   const { body } = options;
   const signature = body === undefined ? null : JSON.stringify({ route, account, body });
   if (signature && !pending.has(signature)) pending.set(signature, operationId());
-  const headers = { Authorization: `Bearer ${token}` };
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  if(csrf)headers['X-CSRF-Token']=csrf;
   if (signature) {
     headers['Content-Type'] = 'application/json';
     headers['Idempotency-Key'] = pending.get(signature);
@@ -39,7 +43,7 @@ export async function api(route, account, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (signature && response.status >= 400 && response.status < 500) pending.delete(signature);
-    if (response.status === 401) throw Error('管理密钥无效或已更换，请断开后重新连接。');
+    if (response.status === 401) throw Error('登录已失效或管理密钥无效，请重新连接或刷新页面登录。');
     throw Error(data.error || `请求失败 (${response.status})`);
   }
   if (signature) pending.delete(signature);
@@ -49,7 +53,7 @@ export async function api(route, account, options = {}) {
 export function getImage(id) {
   if (!images.has(id)) {
     const promise = fetch(`/api/admin/image/${id}`, {
-      headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000),
+      headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(15000),
     }).then(async response => {
       if (!response.ok) throw Error(`图片资源 ${id} 无法读取`);
       const url = URL.createObjectURL(await response.blob());

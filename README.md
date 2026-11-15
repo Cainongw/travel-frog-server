@@ -1,8 +1,10 @@
 # Travel Frog local archive server
 
-This Node.js server provides a local login and SQLite-backed personal archive for the China edition of Travel Frog. The server uses Node built-ins; the optional Svelte 5 management UI is built with Vite.
+This Node.js server provides local gameplay and a SQLite-backed personal archive for the China edition of Travel Frog. The Svelte 5 management UI is built with Vite; optional OAuth/OIDC uses openid-client.
 
-## Svelte 管理台（v0.8）
+v0.9 增加 Authentik/OIDC 管理登录、游戏账号密码登录、Docker 和 k8s Service 部署，以及“旅行青蛙·狗狗特供版”构建参数。[部署与登录配置](docs/deployment.md)；后续逐项完善见 [复刻路线待办](docs/replication-roadmap.md)。OAuth 使用 `openid-client`，其余游戏服务采用 Node 内置库。
+
+## Svelte 管理台（v0.9）
 
 在 `private_server` 目录运行（完整构建建议 Node.js 22.12+）：
 

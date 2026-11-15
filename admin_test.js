@@ -66,7 +66,7 @@ async function startServer(t, options={}) {
   const child = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
     cwd: __dirname,
     env: { ...process.env, FROG_HOST: '127.0.0.1', FROG_PORT: String(port), FROG_DB: path.join(directory, 'test.sqlite'),
-      FROG_ADMIN_TOKEN: TOKEN, FROG_ASSETS: assets, FROG_TRIP_SECONDS: options.tripSeconds || '3600', FROG_VISIT_SECONDS: '60' },
+      FROG_ADMIN_TOKEN: TOKEN, FROG_ASSETS: assets, FROG_TRIP_SECONDS: options.tripSeconds || '3600', FROG_VISIT_SECONDS: '60',FROG_GAME_AUTH_REQUIRED:options.gameAuth?'1':'0' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
@@ -454,6 +454,25 @@ test('HTTP snapshot restore protects state and invalidates connected game client
   assert.equal(list.snapshots[0].summary.clover,90);
   const reconnected=await connect(account);
   assert.equal(reconnected.events.find(x=>x.cmd==='client_load_role').data.res.clover_point,60);
+});
+
+test('game password login is required, tokens survive reconnect and password resets revoke access',async t=>{
+  const {base,post}=await startServer(t,{gameAuth:true});await post('password-frog','create',{});
+  await post('password-frog','game-credentials',{username:'dog',password:'test-password-123'});
+  const login=async password=>fetch(base+'/api/game/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'dog',password})});
+  assert.equal((await login('wrong')).status,401);
+  const response=await login('test-password-123');assert.equal(response.status,200);const {token}=await response.json();
+  const socket=new WebSocket(base.replace('http','ws'));t.after(()=>socket.close());await new Promise(r=>socket.addEventListener('open',r,{once:true}));
+  let session=0;async function call(cmd,data={}){const id=++session;return new Promise(resolve=>{function on(e){const v=JSON.parse(e.data);if(v.session===id){socket.removeEventListener('message',on);resolve(v.data);}}socket.addEventListener('message',on);socket.send(JSON.stringify({cmd,data,session:id}));});}
+  assert.equal((await call('hall.gen_token',{account:'password-frog'})).code,1);
+  assert.equal((await call('client.load_role')).code,1);
+  assert.equal((await call('hall.gen_token',{account:token})).token,token);
+  assert.equal((await call('hall.login',{token})).code,0);
+  assert.equal((await call('hall.reconnect',{token})).account,'password-frog');
+  assert.ok((await call('client.load_role')).frog);
+  await post('password-frog','game-credentials',{username:'dog',password:'updated-password-123'});
+  assert.equal((await call('client.load_role')).code,1);
+  assert.equal((await call('hall.login',{token})).code,1);
 });
 
 test('merchant rows resolve client item details and purchases synchronize after the reply', async t => {
