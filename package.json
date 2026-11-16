@@ -6,10 +6,13 @@
   "scripts": {
     "start": "node server.js",
     "start:admin": "node start_admin.js",
-    "test": "node --test integration_test.js admin_test.js gameplay_test.js gameplay_protocol_test.js furniture_test.js neighbors_test.js official_import_test.js snapshots_test.js protocol_diagnostics_test.js auth_test.js game_auth_test.js game_login_patch_test.js native_login_patch_test.js module_state_test.js progression_test.js activities_test.js creative_test.js postcard_generator_test.js travel_policy_test.js cards_test.js exploration_test.js life_test.js daily_test.js economy_policy_test.js world_test.js planned_travel_test.js review_regression_test.js client_policy_patch_test.js module_validation_test.js",
+    "test": "node --test tests/*_test.js",
     "admin:install": "npm --prefix admin-ui ci",
     "admin:dev": "npm --prefix admin-ui run dev",
-    "admin:build": "npm --prefix admin-ui run build"
+    "admin:build": "npm --prefix admin-ui run build",
+    "apk:prepare": "node tools/android/build_local_client.js",
+    "apk:native": "node tools/android/build_native_login.js",
+    "device:probe": "node tools/qa/device_probe.js"
   },
   "engines": {
     "node": ">=22.5.0"

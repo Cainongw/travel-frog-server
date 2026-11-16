@@ -46,7 +46,7 @@
 ## 接口与集成
 
 ```js
-const {CreativeService}=require('./creative');
+const {CreativeService}=require('./src/game/creative/creative');
 const creative=new CreativeService(database,catalog,{clock:()=>Math.floor(Date.now()/1000)});
 ```
 
@@ -63,7 +63,7 @@ const creative=new CreativeService(database,catalog,{clock:()=>Math.floor(Date.n
 
 ## 已验证
 
-`node --test creative_test.js` 当前通过 16 项：邀请/准备/锁定/解锁/参加/归来完整流程、材料一次性预留与消耗、拒绝归还、真实收藏保留、手作合法字段与延期、木片合成及盒子确认、五数图层不倒翁制作与摆放、失败事务回滚、实际数据库重开和 ModuleState 导入恢复，以及最新私有 APK 配置的所有 36 个不倒翁输出资源合法性。后续庭院与家具策略测试覆盖挂兜上限与重复领取、六槽堆肥、所有 35 个植物真实产物映射、种植阶段/收获、自动物件制作及 353 个可制造家具配置覆盖。
+`node --test tests/creative_test.js` 当前通过 16 项：邀请/准备/锁定/解锁/参加/归来完整流程、材料一次性预留与消耗、拒绝归还、真实收藏保留、手作合法字段与延期、木片合成及盒子确认、五数图层不倒翁制作与摆放、失败事务回滚、实际数据库重开和 ModuleState 导入恢复，以及最新私有 APK 配置的所有 36 个不倒翁输出资源合法性。后续庭院与家具策略测试覆盖挂兜上限与重复领取、六槽堆肥、所有 35 个植物真实产物映射、种植阶段/收获、自动物件制作及 353 个可制造家具配置覆盖。
 
 仍须由主流程完成原生页面操作、聚会事件弹窗、手作展示、工作台锁动画与不倒翁摆放的 adb 实测。
 
@@ -97,7 +97,7 @@ const creative=new CreativeService(database,catalog,{clock:()=>Math.floor(Date.n
 
 ## 第二批：普通家具策略
 
-新增 `furniture_policy.js` 提供 `buildFurnitureRecipes(catalog,{craftSeconds})`、`planFurnitureCraft(database,account,state,recipes)` 和 `beginFurnitureCraft(service,account,now,recipes)`。没有直接改写普通家具核心，需主服务显式集成。
+新增 `src/game/furniture/furniture_policy.js` 提供 `buildFurnitureRecipes(catalog,{craftSeconds})`、`planFurnitureCraft(database,account,state,recipes)` 和 `beginFurnitureCraft(service,account,now,recipes)`。没有直接改写普通家具核心，需主服务显式集成。
 
 最新配置有 405 家具定义，但工作台只明确列出 353 个 type 1 可制造家具，另有 36 个不倒翁、15 个堆肥箱和 6 个挂兜条目。默认家具、夕拾/许愿活动家具没有因此假装可制造。普通家具策略覆盖所有 353 个工作台家具，比旧 style 2–9 共 218 个更完整。
 

@@ -85,7 +85,7 @@ The enhanced `NeighborService` additionally accepts `random`, `arrivalChance`, `
 
 ## Module integration
 
-`neighbors.js` exports:
+`src/game/neighbors/neighbors.js` exports:
 
 - `migrateNeighbors(database)`: create `neighbor_state`; does not set `user_version`.
 - `getNeighborState(database, account)`: read-only raw snapshot, with defaults if no row.
@@ -159,7 +159,7 @@ cross-visit replay detection is not claimed.
 
 ## Verification
 
-`node --test neighbors_test.js` uses temporary or in-memory SQLite. Tests cover
+`node --test tests/neighbors_test.js` uses temporary or in-memory SQLite. Tests cover
 wire shape, wrong species, item type/ownership, specialty-order taste lookup,
 single consumption, deadlines, province concurrency, mail settlement exactly
 once, manual arrival/departure, transaction rollback, offline reopen, import

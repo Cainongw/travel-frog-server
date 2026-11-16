@@ -24,7 +24,9 @@ adb shell am start -a android.intent.action.VIEW -d dogfrog://account com.cainon
 
 ## 可重复构建
 
-`android/NativeLoginActivity.java` 为源码，`build_native_login.js` 调用 javac 与 D8 生成新增的 `classes4.dex`，修改 Launcher，并追加 `native_login_patch.js`。最低 Android 5.0，versionCode 22；原始三个 DEX 不重编译。
+所有构建命令从仓库根目录执行；目录分类见 [architecture.md](architecture.md)。`tools/android/` 保存构建工具及Java源码，`tools/android/patches/` 保存追加到客户端的补丁，产物仍写到忽略的 `exports/`。
+
+`tools/android/NativeLoginActivity.java` 为源码，`tools/android/build_native_login.js` 调用 javac 与 D8 生成新增的 `classes4.dex`，修改 Launcher，并追加 `tools/android/patches/native_login_patch.js`。最低 Android 5.0，versionCode 22；原始三个 DEX 不重编译。
 
 本机构建依赖位于忽略的 `exports/android-tools/`：
 

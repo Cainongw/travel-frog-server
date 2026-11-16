@@ -15,9 +15,10 @@ ENV NODE_ENV=production FROG_HOST=0.0.0.0 FROG_PORT=8080 FROG_DB=/data/travel-fr
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
-COPY *.js ./
-COPY data/postcards.json ./data/postcards.json
-RUN mkdir -p /data /assets && chown node:node /data /assets
+COPY server.js start_admin.js ./
+COPY src/ ./src/
+# Runtime seeds no personal source data; real saves/assets live on the PVC.
+RUN mkdir -p /app/data /data /assets && printf '[]\n' > /app/data/postcards.json && chown node:node /data /assets
 USER node
 EXPOSE 8080
 CMD ["node","server.js"]

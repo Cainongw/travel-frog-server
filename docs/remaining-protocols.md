@@ -1,6 +1,6 @@
 # 协议覆盖复查与仍需验收的玩家入口
 
-扫描时间：2026-11-16；来源为本机 `exports/dog-apk-build/decoded/assets/game/js/main.min.js`，SHA-256 `55de6c6bd2293a85b50b1b89312235e9c9f373fadfb02aa6837256784de071a8`。偏移均为 UTF-16 字符偏移，不是 APK/Dex 字节地址。服务端按当前 `server.js` 分支及实际注册的十个 `gameModules` 的 `commands/handledCommands` 对照；本文件是本次代码扫描快照，后续接入新模块需重新核对。
+扫描时间：2026-11-16；来源为本机 `exports/dog-apk-build/decoded/assets/game/js/main.min.js`，SHA-256 `55de6c6bd2293a85b50b1b89312235e9c9f373fadfb02aa6837256784de071a8`。偏移均为 UTF-16 字符偏移，不是 APK/Dex 字节地址。服务端按当前 `src/server.js` 分支及实际注册的十个 `gameModules` 的 `commands/handledCommands` 对照；本文件是本次代码扫描快照，后续接入新模块需重新核对。
 
 ## 如何判断覆盖
 
@@ -15,7 +15,7 @@
 | `client_change_decorate` / 插花装饰 | `RoleModel.changeDecoration` 确实发请求，成功后调整花枝数量、摆放 ID 和生长状态；偏移 177392 | 第二轮已注册 `DecorationService`，替换仅回放旧数据的方式 | 第 3/8/14 项：验收持有花枝、选择/替换、成长、枯萎/阶段与称号/图鉴事件，不能只显示旧花枝。 |
 | `item_select_gift` | 真实 UI 按 1 起始的 `index_list` 选择；请求前先把本地队列 shift；偏移 144884 | 第二轮已注册 `GiftsService` | 第 2/8/9/12 项：保留原队列、一次性预留与领取，失败推回权威队列。 |
 | `item_load_select_gift` | `ItemModel` 接收 `{list:[{num,items:[{item_id,count}]}]}`，弹自选窗口 | 没有直接字面 send；第二轮已接持久自选队列 | 跟 `item_select_gift` 一并验收；不要误判成“没 handler 就缺一个请求”。 |
-| 固定礼包/种子盲盒展开 | 商人成功回调专门跳过给 type 5 加库存，等待 `item_gift_open`；扭蛋真实奖励 206 为 5101 种子盲盒 | 第一轮只加死库存，第二轮 `gifts.js` 已接入统一扫描展开 | 5001/2/3 按 `GiftData_json` 精确数量；5101 两种子/5102 一种子按文字，抽取概率近似。验收实际跨模块奖励不再成为无法使用的物品。 |
+| 固定礼包/种子盲盒展开 | 商人成功回调专门跳过给 type 5 加库存，等待 `item_gift_open`；扭蛋真实奖励 206 为 5101 种子盲盒 | 第一轮只加死库存，第二轮 `src/game/economy/gifts.js` 已接入统一扫描展开 | 5001/2/3 按 `GiftData_json` 精确数量；5101 两种子/5102 一种子按文字，抽取概率近似。验收实际跨模块奖励不再成为无法使用的物品。 |
 | 商人礼包可见性 | 家具商店配置含 5001/5002/5003/5101，普通付费草购买与广告免费行并存 | 旧过滤只留 type 10–13；已有新过滤策略供整合 | `GiftsService.supportsShopItem` 给出已支持类型策略；保留普通食品/工具/种子/礼包，单独过滤 type 998 广告入口。 |
 
 以上内容应优先补齐再声称对应路线图完整。礼包模块的具体形状、配置依据与测试见 [gift-protocols.md](gift-protocols.md)。

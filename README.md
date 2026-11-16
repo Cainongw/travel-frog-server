@@ -6,6 +6,10 @@ v0.12 开发版加入配置驱动明信片/旅行、创作与庭院、动态照�
 
 管理台继续采用独立 Docker 镜像、Authentik 登录和游戏账号管理，APK 使用 Android 原生登录与自动续期。[部署与登录配置](docs/deployment.md)；[原生登录构建与证据](docs/native-login.md)。OAuth 使用 `openid-client`，其余游戏服务采用 Node 内置库。
 
+管理台增加“游戏公告”发布/停用和浅色、深色、跟随系统主题。[公告与主题用法](docs/admin-console.md)说明展示与保存行为。
+
+源码已按模块迁入 `src/`，回归测试在 `tests/`，APK/官方采集/QA/资源脚本在 `tools/`；根目录仅保留 `server.js` 和 `start_admin.js` 两个JavaScript启动入口。[目录与架构](docs/architecture.md)列出各模块职责和更新后的命令。当前生产服务仍为0.11，0.12是待整体验证的开发版本。
+
 ## Svelte 管理台
 
 在 `private_server` 目录运行（完整构建建议 Node.js 22.12+）：
@@ -22,9 +26,9 @@ npm run start:admin
 Get-Content .\data\admin.token
 ```
 
-密钥文件、SQLite 和构建产物均不提交到 Git。网页只在内存中保存密钥，刷新后需重新输入。
+密钥文件、SQLite 和构建产物均不提交到Git。以上是本地开发的密钥模式，网页只在内存中保存密钥，刷新后需重新输入；部署的Authentik模式使用服务器会话，刷新页面会自动恢复。
 
-设备采集脚本 `device_backup.js` / `prepare_official_capture.js` 要求用 `FROG_DEVICE` 指定 adb 序列号，可用 `FROG_ADB` 指定 adb 路径。构建本地客户端的 `build_local_client.js` 用 `FROG_ACCOUNT` 指定私服账号（默认为 `guest`）；构建前需准备脚本中指定的本地 APK 解包及热更新资源目录。个人备份和资源不随源码发布。
+设备采集脚本 `tools/official/device_backup.js` / `tools/official/prepare_official_capture.js` 要求用 `FROG_DEVICE` 指定 adb 序列号，可用 `FROG_ADB` 指定 adb 路径。构建本地客户端的 `tools/android/build_local_client.js` 用 `FROG_ACCOUNT` 指定私服账号（默认为 `guest`）；构建前需准备脚本中指定的本地 APK 解包及热更新资源目录。个人备份和资源不随源码发布。
 
 管理台支持账号搜索/创建、在线状态、角色名/草/券修改、天气、笔记解锁、访客离场、明信片预览和下发、奖励邮件、相册与库存查看、JSON 导入导出、审计记录与导入前自动备份下载。导入替换前必须确认目标账号；替换前的快照和操作记录与业务修改在同一 SQLite 事务内提交。发送请求带幂等编号，网络失败重试不会重复发奖。
 
@@ -44,7 +48,7 @@ Get-Content .\data\admin.token
 
 官方账号的原始采集数据始终保留，启用后由 SQLite 中的当前状态驱动相册、物品、旅行、邮件、抽奖、家具和邻居等已有玩法。没有本地计时记录的官方旅行/聚会状态会切回在家，不补发奖励；这些转换不改动原始采集数据和已保存的快照。回档到旧的只读快照时也会应用此转换，保持可测试状态。之前已经创建快照的账号，可点击顶部“已有快照，启用玩法”。未实现的活动仍只能展示已有记录，其操作会记入下述日志。
 
-API（均要求 Bearer 管理密钥，POST 另带 `Idempotency-Key`）：
+API需要已登录OIDC会话（写请求同时验证CSRF），或本地开发模式的Bearer管理密钥；POST另带 `Idempotency-Key`：
 
 - `GET /api/admin/snapshots?account=...`：返回 `{snapshots,next_cursor}`，每页最多 100 条，继续翻页传 `before=next_cursor`。
 - `POST /api/admin/snapshot-create?account=...`，JSON：`{"label":"出发前"}`（名称可空，最多 100 字符）。
@@ -59,7 +63,7 @@ API（均要求 Bearer 管理密钥，POST 另带 `Idempotency-Key`）：
 
 在“操作记录 → 未实现功能日志”查看；点击管理台“刷新”获取最新记录。日志按账号、协议和原因累计次数，保存首次/最近触发时间及最近参数摘要，并同步输出到服务器控制台的 `[unsupported]` 行。参数保留数字编号和结构，文本与凭据脱敏。日志保存在 SQLite 的 `admin_unsupported_calls` 表，服务器重启和账号回档都不会清除。只在客户端本地发生、没有发送网络请求的点击无法由服务器发现。
 
-`GET /api/admin/unsupported?account=...`（Bearer 管理密钥）返回 `{calls}`，按最近触发时间展示最多 200 类记录；原因包括 `unimplemented`、`snapshot_read_only` 和 `archive_readonly`。这些日志属于服务器管理数据，不随账号 JSON 导出迁移。
+`GET /api/admin/unsupported?account=...`（已登录管理会话或开发密钥）返回 `{calls}`，按最近触发时间展示最多200类记录；原因包括 `unimplemented`、`snapshot_read_only` 和 `archive_readonly`。这些日志属于服务器管理数据，不随账号JSON导出迁移。
 
 ### 家具和邻居怎么用
 
@@ -97,6 +101,10 @@ npm run start:admin
 ```
 
 此时管理台地址为 `http://127.0.0.1:18080/admin/`。游戏仍连接设备上的 8080 时，ADB 映射需改为 `adb reverse tcp:8080 tcp:18080`，无需再次修改 APK。
+
+## 早期兼容模式说明
+
+以下英文段落保留早期本地兼容流程与API示例，其中固定五场景、60秒旅行等属于历史测试模式。当前0.12开发模块及生产0.11的差异和未完成验收项，以[实现状态](docs/implementation-status.md)和[复刻路线](docs/replication-roadmap.md)为准。
 
 Implemented archive features:
 
@@ -145,10 +153,10 @@ Requires Node.js 22.5 or newer because it uses the built-in `node:sqlite` module
 
 ## Client setup
 
-The game client must use its built-in `TestChannel` and connect to `ws://127.0.0.1:8080`. `patch_runtime.js` applies those two changes to the hot-update `main.min.js` used during development:
+The game client must use its built-in `TestChannel` and connect to `ws://127.0.0.1:8080`. `tools/resources/patch_runtime.js` applies those two changes to the hot-update `main.min.js` used during development:
 
 ```powershell
-node .\patch_runtime.js <original-main.min.js> <patched-main.min.js>
+node .\tools\resources\patch_runtime.js <original-main.min.js> <patched-main.min.js>
 ```
 
 Back up the original file, replace the matching runtime-cache file on the rooted test device, and then create the adb reverse mapping shown below. The patcher validates its expected source strings and stops instead of modifying an unknown client build.

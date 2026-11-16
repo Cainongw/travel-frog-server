@@ -1,6 +1,6 @@
 # 日历、任务清单、年报和场景收藏
 
-`daily.js` 承接路线图第 6 项，并补齐年报统计、点击特效和美好瞬间请求校验。全部状态存入 `game_module_state.daily`，原始 moments/任务原始采集保留；事务奖励与整账号快照一起恢复。
+`src/game/progression/daily.js` 承接路线图第 6 项，并补齐年报统计、点击特效和美好瞬间请求校验。全部状态存入 `game_module_state.daily`，原始 moments/任务原始采集保留；事务奖励与整账号快照一起恢复。
 
 ## 静态证据
 
@@ -33,7 +33,7 @@
 ## 日历本地规则和广告替代
 
 - 按中国时区 UTC+8 刷新月历、日号与登录记录。新呱首七日只允许领取当前创建天数对应奖励；七日之后可用客户端已有的兑换文字补领未领的对应礼包，每日礼包永久只能领取一次。
-- 客户端节气任务原文是“观看广告或分享一次、累计获得30草、抽奖兑奖一次”。私服把第一项替换为登录一次，后两项仍基于服务端实际收益和兑奖观察。配套 `client_policy_patch.js` 仅包装 `CalendarNoteView.childrenCreated`，在实际节气任务窗口把第一条改成“登录游戏（进度/1）”；不替换全局广告文本，不影响其他任务、普通日历备注或新呱礼包。该文件须追加到下一版 APK 才生效，旧安装包仍保留原文。
+- 客户端节气任务原文是“观看广告或分享一次、累计获得30草、抽奖兑奖一次”。私服把第一项替换为登录一次，后两项仍基于服务端实际收益和兑奖观察。配套 `tools/android/patches/client_policy_patch.js` 仅包装 `CalendarNoteView.childrenCreated`，在实际节气任务窗口把第一条改成“登录游戏（进度/1）”；不替换全局广告文本，不影响其他任务、普通日历备注或新呱礼包。该文件须追加到下一版 APK 才生效，旧安装包仍保留原文。
 - 无历史排期的新月份，每月 22 日安排一份配置中当月节气食品；幸运日按账号与月份生成两个稳定日期，并从已存在的食物、护符、特产、材料中选奖。日历排期和奖励分布是近似，未恢复官方节气历/幸运概率。
 - 当月每日备注从真实 `calendarData.note` 配置中选择，最新配置共 887 个合法备注 ID。旧采集当月备注保留，跨月重新排布。
 - 已领节气或幸运项从当前列表移除并存档；跨月不会重新开放已领的新呱礼包，也不清除长期任务领奖标记。
@@ -64,13 +64,13 @@
 
 `DailyService` 提供同其他模块一致的 `commands`、`initial`、`handle -> {response,events}`、`advance -> {changed,events}`，推送应在 session 回包后发送；`observe` 返回同一事件结构。配置来自 `catalog.config`。
 
-`node --test daily_test.js` 通过 8 项：新手天数与老账号补领；节气/幸运领取防重复；任务门槛与顺序清单、完整快照回档；动态年报；触摸特效归属和瞬间场景校验；跨月重置；失败事务回滚；真实最新配置所有任务奖励、7 日礼包、887 备注和30个瞬间合法性。
+`node --test tests/daily_test.js` 通过 8 项：新手天数与老账号补领；节气/幸运领取防重复；任务门槛与顺序清单、完整快照回档；动态年报；触摸特效归属和瞬间场景校验；跨月重置；失败事务回滚；真实最新配置所有任务奖励、7 日礼包、887 备注和30个瞬间合法性。
 
 尚待主流程 adb 验证日历格子、备注、任务领奖弹窗、年报分页、设置中特效切换，以及拍摄美好瞬间的原生交互。未将这些实机项标记完成。
 
 ## 客户端策略补丁和动作枚举
 
-追加方式：`';('+require('./client_policy_patch').clientPolicyPatch.toString()+')();'`。补丁检查目标类存在、保留原方法的 this/参数/返回值，并通过原型标志避免重复包装；无需执行字符串替换或改渠道 SDK。`node --test client_policy_patch_test.js` 验证只改节气第一行、保留其余行、普通备注和新呱备注不受影响，以及重复追加安全。后续还增加了实际 `MainInView.updateDecoration` 空瓶清图，解决花材移除后旧图片残留，见 [decoration-protocols.md](decoration-protocols.md)。
+追加方式：`';('+require('./tools/android/patches/client_policy_patch').clientPolicyPatch.toString()+')();'`。补丁检查目标类存在、保留原方法的 this/参数/返回值，并通过原型标志避免重复包装；无需执行字符串替换或改渠道 SDK。`node --test tests/client_policy_patch_test.js` 验证只改节气第一行、保留其余行、普通备注和新呱备注不受影响，以及重复追加安全。后续还增加了实际 `MainInView.updateDecoration` 空瓶清图，解决花材移除后旧图片残留，见 [decoration-protocols.md](decoration-protocols.md)。
 
 主脚本 `Tabikaeru.Define.FrogMotionName` 的合法映射为：
 
@@ -87,4 +87,4 @@
 | 12 | `sleep_3` | 夜间合法睡姿 |
 | 13 | `sleep_4` | 夜间合法睡姿 |
 
-对应 `HoursType` 为日间 1、傍晚 2、夜间 3、深夜 4。普通生活调度可先选 0/1/2/3/4/10–13；离家状态应由旅行/聚会模块掌管，不在户外替换成在家睡觉。`daily.js` 的 MOTIONS 把 2 映射到最终可见的 `LW_writing`，用于匹配 momentData 的 param，不是错误地改写原 FrogMotionName 枚举。
+对应 `HoursType` 为日间 1、傍晚 2、夜间 3、深夜 4。普通生活调度可先选 0/1/2/3/4/10–13；离家状态应由旅行/聚会模块掌管，不在户外替换成在家睡觉。`src/game/progression/daily.js` 的 MOTIONS 把 2 映射到最终可见的 `LW_writing`，用于匹配 momentData 的 param，不是错误地改写原 FrogMotionName 枚举。

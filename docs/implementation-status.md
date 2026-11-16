@@ -48,11 +48,11 @@ v0.10 增加独立管理 Docker 镜像/Deployment/Service，保留原公网管�
 
 v0.9 增加 Authentik/OIDC 管理登录（授权码、PKCE、nonce、签名验证、用户组授权、HttpOnly Cookie、CSRF）与游戏账号密码（scrypt、限频、24 小时随机令牌）。部署模式强制密码登录；默认本地开发仍兼容 TestChannel 和管理密钥。OAuth 会话、凭据、游戏令牌属于认证数据，不进入账号快照或导出。单副本 Docker/k8s 部署及接入说明见 [deployment.md](deployment.md)。
 
-v0.8 新增手动账号快照与回档。`snapshots.js` 保存全部账号游戏表的原始行，并且直接事务恢复，不通过会填充默认值的普通 JSON 导入器。官方保全快照同样支持。恢复前保存当前状态的保护快照；恢复后在线连接失效，需重新连接。快照、管理审计和幂等历史不会被恢复过程删除。定时快照、删除/保留策略与全服务器配置快照不在本版范围。
+v0.8 新增手动账号快照与回档。`src/core/snapshots.js` 保存全部账号游戏表的原始行，并且直接事务恢复，不通过会填充默认值的普通 JSON 导入器。官方保全快照同样支持。恢复前保存当前状态的保护快照；恢复后在线连接失效，需重新连接。快照、管理审计和幂等历史不会被恢复过程删除。定时快照、删除/保留策略与全服务器配置快照不在本版范围。
 
 官方保全账号创建快照后自动进入 `active` 模式，已有快照可通过 `archive-activate` 启用。已有玩法读取和更新当前 SQLite 游戏表，原始采集记录仍完整保留；未实现的模块可展示原始记录，但不能继续结算。缺少本地旅行计时记录的官方旅行/聚会状态切回在家，不编造收益。回档到旧保全快照后同样启用玩法，保持可测试状态。快照创建/模式切换与审计在同一事务内，启用后旧客户端连接失效，需重进。
 
-`protocol_diagnostics.js` 将未实现请求、仅原始快照读取及保全只读拒绝聚合到 `admin_unsupported_calls`，按账号/协议/原因记录次数、首次及最近时间、脱敏参数摘要。管理台“操作记录”展示最近 200 类日志，也可通过 `GET /api/admin/unsupported` 查看。日志不受回档影响；客户端不发送请求的本地操作无法由服务器记录。
+`src/observability/protocol_diagnostics.js` 将未实现请求、仅原始快照读取及保全只读拒绝聚合到 `admin_unsupported_calls`，按账号/协议/原因记录次数、首次及最近时间、脱敏参数摘要。管理台“操作记录”展示最近 200 类日志，也可通过 `GET /api/admin/unsupported` 查看。日志不受回档影响；客户端不发送请求的本地操作无法由服务器记录。
 
 前端位于 `admin-ui`，构建后通过 `/admin/` 提供。`/api/admin/*` 与游戏 WebSocket 共用 Node 服务，但使用不同访问规则。
 
@@ -74,7 +74,7 @@ HTTP 管理支持 OIDC 会话或开发用 Bearer 密钥。游戏 WebSocket 默�
 
 ## 明信片模板的还原程度
 
-`travel_data.js` 选择了 APK 中存在的五种场景、青蛙与同行者资源，转换角色坐标，并用手工设置的像素坐标排布背景。客户端与预览都按图层顺序绘制到 500×350 画布。
+`src/game/travel/travel_data.js` 选择了 APK 中存在的五种场景、青蛙与同行者资源，转换角色坐标，并用手工设置的像素坐标排布背景。客户端与预览都按图层顺序绘制到 500×350 画布。
 
 这些模板是供离线玩法使用的近似排布，不能称为已经恢复官方服务器的完整构图算法。当前没有覆盖全部图片配置的随机背景选择、坐标规则、道具姿态、季节变体或稀有图片概率。管理台可以发送已知合法图层记录，但并不意味着所有 `pic_id` 都已有自动生成模板。原始 PNG 是资源素材，而不是某个玩家拥有那张明信片的证明。
 
@@ -82,16 +82,16 @@ HTTP 管理支持 OIDC 会话或开发用 Bearer 密钥。游戏 WebSocket 默�
 
 下列模块已经落地并通过隔离回归，但逐项原生验收尚未全部完成，不能因此将整个路线图勾完：
 
-- `creative.js`：绘画聚会、手作/印章/木片合成、不倒翁、花盆、堆肥、挂兜。[创作说明](creative-protocols.md)
-- `activities.js` / `cards.js`：动态照片、扭蛋、许愿池、两类贺卡、蛋糕问答。[活动](activity-protocols.md)与[贺卡蛋糕](card-cake-protocols.md)
-- `exploration.js`：博物馆路线、票/收藏/图片与周末挑选。`koto` 只有协议声明，入口仍缺证据。[探索说明](exploration-protocols.md)
-- `life.js` / `daily.js`：烹饪任务与月度食品、故事赠礼反馈、日历与清单、新呱奖励、年报、点击特效及美好瞬间。[生活](life-protocols.md)与[日常](daily-protocols.md)
-- `progression.js`：103 条配置称号条件、双百科、限期称号道具与过期；长周期以隔离虚拟时间测试。[成长说明](progression.md)
-- `postcard_generator.js` / `travel_policy.js`：配置构图与旅行倾向。图层合法不等于所有近似构图都已视觉验收。[明信片](postcard-generation.md)与[旅行](travel-policy.md)
+- `src/game/creative/creative.js`：绘画聚会、手作/印章/木片合成、不倒翁、花盆、堆肥、挂兜。[创作说明](creative-protocols.md)
+- `src/game/activities/activities.js` / `src/game/activities/cards.js`：动态照片、扭蛋、许愿池、两类贺卡、蛋糕问答。[活动](activity-protocols.md)与[贺卡蛋糕](card-cake-protocols.md)
+- `src/game/activities/exploration.js`：博物馆路线、票/收藏/图片与周末挑选。`koto` 只有协议声明，入口仍缺证据。[探索说明](exploration-protocols.md)
+- `src/game/life/life.js` / `src/game/progression/daily.js`：烹饪任务与月度食品、故事赠礼反馈、日历与清单、新呱奖励、年报、点击特效及美好瞬间。[生活](life-protocols.md)与[日常](daily-protocols.md)
+- `src/game/progression/progression.js`：103 条配置称号条件、双百科、限期称号道具与过期；长周期以隔离虚拟时间测试。[成长说明](progression.md)
+- `src/game/travel/postcard_generator.js` / `src/game/travel/travel_policy.js`：配置构图与旅行倾向。图层合法不等于所有近似构图都已视觉验收。[明信片](postcard-generation.md)与[旅行](travel-policy.md)
 
 所有新进度位于账号级 `game_module_state`，参与 JSON 导入导出与原始行快照；旧快照没有模块状态时恢复为空，旧捕获仍保留。已知模块导入执行结构/数值校验，拒绝损坏数据；定时推进按模块/账号隔离异常，不应由一份损坏进度终止整个服务。分享/广告/充值与官方 SDK 服务仍不接入；有本地替代的任务明确写在对应说明中。
 
-`server.js` 的默认分支对未实现协议记录日志并返回 `{code:1,supported:false}`，同时发送有限频率的客户端提示。有原始记录的未实现读取协议会返回记录并记为 `snapshot_read_only`。初始化推送中的空数据和原始活动记录不代表相应玩法已经实现。
+`src/server.js` 的默认分支对未实现协议记录日志并返回 `{code:1,supported:false}`，同时发送有限频率的客户端提示。有原始记录的未实现读取协议会返回记录并记为 `snapshot_read_only`。初始化推送中的空数据和原始活动记录不代表相应玩法已经实现。
 
 ## 下一步与验证边界
 

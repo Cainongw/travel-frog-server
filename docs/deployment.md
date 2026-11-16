@@ -2,17 +2,19 @@
 
 ## 服务
 
-本轮全功能开发保留快照 #3 和完整库备份，第一批镜像 0.11.0 已在集群运行；整合后的 0.12.0 仍需完成整体验证后逐步升级，进度以 [replication-roadmap.md](replication-roadmap.md) 为准。
+本轮全功能开发保留快照 #3 和完整库备份。服务端和管理端均已升级为 **0.12.0**，两个 Deployment 各 1/1 Ready；原生玩法的逐项验收仍在继续，进度以 [replication-roadmap.md](replication-roadmap.md) 为准。
 
-如 Docker Desktop 引擎不可用且运行时依赖完全未变，可用 `deploy/build_overlay.py` 对已验证的 Docker-save 基础镜像追加 `/app` 源码层，生成标准 OCI 包，再通过 master 的 `ctr images import/push` 发布。脚本拒绝超出 JS/package 清单的路径并固定检查运行依赖，不读取 registry 凭据。正常环境仍优先按 Dockerfile 构建；修改依赖时必须重建运行时镜像。
+Docker Desktop引擎不可用时，可用 `deploy/build_overlay.py` 基于已验证且依赖锁一致的Docker-save镜像生成标准OCI包，再由master的 `ctr images import/push` 发布。脚本已支持层级 `src/**` 服务端与管理台静态文件两种模式，清理旧扁平JS和旧UI，不包含工具、测试、个人资源或凭据。依赖改变时需重建运行时镜像，正常环境优先使用Dockerfile。
 
 `Dockerfile` 提供两个构建目标：`server` 为 Node.js 24 游戏/API 服务，`management` 为独立 Nginx/Svelte 管理端。两个镜像均不包含游戏素材、数据库、管理密钥或 APK。`deploy/k8s.yaml` 在 `travel-frog` 命名空间创建两个 Deployment 和 Service；只有游戏服务挂载 Longhorn PVC，不创建 Ingress。SQLite 使用单副本和 Recreate 更新；数据库与素材都放在 `/data`，需另外备份持久卷。
 
+以下是从仓库根目录复现0.12镜像的命令；执行构建/推送不会自动更新Deployment：
+
 ```powershell
-docker build --target server -t harbor.k8s.lan/library/travel-frog-server:0.10.0 .
-docker build --target management -t harbor.k8s.lan/library/travel-frog-admin:0.10.0 .
-docker push harbor.k8s.lan/library/travel-frog-server:0.10.0
-docker push harbor.k8s.lan/library/travel-frog-admin:0.10.0
+docker build --target server -t harbor.k8s.lan/library/travel-frog-server:0.12.0 .
+docker build --target management -t harbor.k8s.lan/library/travel-frog-admin:0.12.0 .
+docker push harbor.k8s.lan/library/travel-frog-server:0.12.0
+docker push harbor.k8s.lan/library/travel-frog-admin:0.12.0
 ```
 
 实际实例已使用本机现有 Harbor 凭据；私有 registry 应另行配置专用 imagePullSecret。示例镜像放在现有公开 `library` 项目，仅含源码和运行时。
@@ -23,7 +25,9 @@ docker push harbor.k8s.lan/library/travel-frog-admin:0.10.0
 
 迁移时菜农有 207 张图片记录、1749 草、2 券，共 2 个快照（含迁移前快照）。集群内已验证健康检查、管理端未登录拒绝、游戏密码登录、WebSocket 登录后读取菜农角色、SQLite 完整性。电脑上没有运行中的旧服务器；本地数据库保留为迁移备份，不与集群实时双向同步。
 
-v0.10 已部署两个镜像：`travel-frog-server:0.10.0` 和 `travel-frog-admin:0.10.0`。管理端 Service 为 `travel-frog-admin.travel-frog.svc.cluster.local:8080` / `10.106.181.173:8080`。游戏服务通过 `FROG_ADMIN_UI_ORIGIN` 转发 `/admin/` 到管理容器，因此原有公网 `/admin/` 地址继续可用；管理容器的 `/auth/`、`/api/` 和 WebSocket 又转发回游戏服务，所有管理写入与 OAuth 校验仍在唯一后端完成，不共享挂载 SQLite。升级前已在 `/data/backups/pre-0.10-*.sqlite` 创建一致性备份。
+0.12 发布记录：服务端摘要 `sha256:035c1a81f9e4912886460b8d9f3518ecb7a2e8fd4b14ebf9b4fd65118f341b47`；管理端摘要 `sha256:042569fd97ba15f095fc2aa2871d16a8b6e416c865d8eecdf0c3ddd22fb1f428`。升级前完整库备份 `/data/backups/pre-0.12-1794827166041.sqlite`。公网健康检查返回0.12.0，管理台已服务含公告/主题的构建，Authentik授权跳转和公告API的未登录拒绝均通过；手机QA副本已自动登录并读取日历、烹饪、探索、周末挑选、自选礼包、插花和百科状态。后台公告发布/停用及深浅主题切换和刷新保留已在隔离浏览器验证。
+
+历史v0.10首次部署时发布了 `travel-frog-server:0.10.0` 和 `travel-frog-admin:0.10.0` 两个镜像，后续版本见当前发布记录。管理端 Service 为 `travel-frog-admin.travel-frog.svc.cluster.local:8080` / `10.106.181.173:8080`。游戏服务通过 `FROG_ADMIN_UI_ORIGIN` 转发 `/admin/` 到管理容器，因此原有公网 `/admin/` 地址继续可用；管理容器的 `/auth/`、`/api/` 和 WebSocket 又转发回游戏服务，所有管理写入与 OAuth 校验仍在唯一后端完成，不共享挂载 SQLite。升级前已在 `/data/backups/pre-0.10-*.sqlite` 创建一致性备份。
 
 雷池/已有反向代理需要为 `travelfrog.caiw.pp.ua:8133` 添加上游 `http://travel-frog.travel-frog.svc.cluster.local:8080`（在集群网络外使用 Service ClusterIP），启用 WebSocket Upgrade，设置合理长连接超时并保留原始 Origin。外部 TLS 在代理终止，客户端使用 HTTPS / WSS。服务不信任代理提供的身份头，也不接受 OAuth 模式下的旧 Bearer 管理密钥。
 
@@ -71,8 +75,8 @@ $env:FROG_PACKAGE='com.cainong.travelfrog.dog'
 $env:FROG_APP_NAME='旅行青蛙·狗狗特供版'
 $env:FROG_SERVER_URL='wss://travelfrog.caiw.pp.ua:8133'
 $env:FROG_GAME_LOGIN='1'
-node build_local_client.js exports/dog-apk-build/decoded
-node build_native_login.js exports/dog-apk-build/decoded
+node tools/android/build_local_client.js exports/dog-apk-build/decoded
+node tools/android/build_native_login.js exports/dog-apk-build/decoded
 ```
 
 原生构建依赖见 [native-login.md](native-login.md)。然后用 apktool 构建，用本地保存的专用 keystore 对齐并签名；后续升级必须使用同一签名。新包 versionCode 为 22、最低 Android 5.0，与官方版、本地 USB 版并存。服务器凭据和 OAuth Secret 不进入 APK，游戏静态资源随包提供，停用远端热更新。已通过 adb 安装到 `c8e8d4e1` 并确认 Android 原生输入框、密码框和按钮可见，首次账号密码登录及重启进入游戏由用户继续实测。

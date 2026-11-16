@@ -1,6 +1,6 @@
 # 槽位、商店、省份访客与天气辅助策略
 
-`economy_policy.js` 是不读写数据库的辅助模块，供持久层整合。它不会自行扣款、返还溢出库存或更改既有角色；调用方必须在账号事务里提交变化。
+`src/game/economy/economy_policy.js` 是不读写数据库的辅助模块，供持久层整合。它不会自行扣款、返还溢出库存或更改既有角色；调用方必须在账号事务里提交变化。
 
 ## 直接确认的客户端字段
 
@@ -29,7 +29,7 @@
 ## 接入示例与测试
 
 ```js
-const {EconomyPolicy}=require('./economy_policy');
+const {EconomyPolicy}=require('./src/game/economy/economy_policy');
 const policy=new EconomyPolicy({config:catalog.config,catalog});
 policy.shop; // Map<shopId,{id,itemId,price,limit,requires,...}>
 policy.checkPurchase(shopId,{clover,inventory,bag,desk,purchases});
@@ -38,4 +38,4 @@ policy.provinceVisitor({now:unixSeconds,durationSeconds:1800,acquired});
 policy.weatherAt(unixSeconds,{offsetMinutes:480,seed:'my-world'});
 ```
 
-`node --test economy_policy_test.js` 5 项测试通过，覆盖精确槽位、溢出返还计划、前置与装备持有量限购、扩容/保全计数、配置省份礼物、时区和稳定天气；真实配置测试确认商品多于旧 64 条、省份多于 30 个。该结果只证明辅助策略，需要核心数据库、协议和客户端端到端测试后才可完成路线图对应项。
+`node --test tests/economy_policy_test.js` 5 项测试通过，覆盖精确槽位、溢出返还计划、前置与装备持有量限购、扩容/保全计数、配置省份礼物、时区和稳定天气；真实配置测试确认商品多于旧 64 条、省份多于 30 个。该结果只证明辅助策略，需要核心数据库、协议和客户端端到端测试后才可完成路线图对应项。

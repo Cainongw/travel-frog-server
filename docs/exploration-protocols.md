@@ -1,6 +1,6 @@
 # 博物馆探索、古琴协议与周末挑选活动
 
-实现为 `exploration.js` / `ExplorationService`，沿用 `ActivitiesService` 的构造和资源结算辅助方法。`handledCommands` 24 个；`initial(account)` 返回事件数组；`handle` 返回 `{response,events}`；`advance/observe` 返回 `{events}`。状态存入 `game_module_state`，所有写入与物品/相册/图鉴结算共用 SQLite 事务，支持 JSON 存档和账号快照。
+实现为 `src/game/activities/exploration.js` / `ExplorationService`，沿用 `ActivitiesService` 的构造和资源结算辅助方法。`handledCommands` 24 个；`initial(account)` 返回事件数组；`handle` 返回 `{response,events}`；`advance/observe` 返回 `{events}`。状态存入 `game_module_state`，所有写入与物品/相册/图鉴结算共用 SQLite 事务，支持 JSON 存档和账号快照。
 
 ## 静态依据与未知边界
 
@@ -45,6 +45,6 @@
 
 ## 验证
 
-`node --test exploration_test.js` 的8项测试覆盖：合法地图坐标与邻接、非瞬移计时、离线走格、途中一次性领取、终点票/收藏/生成器图片、重复终点拒绝、错误方向/写库失败回滚罗盘、每日不重复加币、库存罗盘转换、鼓舞次数、koto与museumday隔离、挑选五项校验/等待/结算/一次领奖/跨期、官方旧记录导入、正在移动和待结算活动随快照恢复。
+`node --test tests/exploration_test.js` 的8项测试覆盖：合法地图坐标与邻接、非瞬移计时、离线走格、途中一次性领取、终点票/收藏/生成器图片、重复终点拒绝、错误方向/写库失败回滚罗盘、每日不重复加币、库存罗盘转换、鼓舞次数、koto与museumday隔离、挑选五项校验/等待/结算/一次领奖/跨期、官方旧记录导入、正在移动和待结算活动随快照恢复。
 
 最新完整配置+真实转换存档的隔离内存 smoke 通过：24个命令、4条当前活动博物馆、3个原始博物馆记录和5个已选物品保留，刷新生成合法路径，原始 capture 未变化。实际地图页、终点动画、古琴入口及周末挑选的原生交互由主任务继续实测；静态字段和私服测试不能替代这些验证。

@@ -5,10 +5,13 @@
   import Garden from './Garden.svelte';
   import Snapshots from './Snapshots.svelte';
   import GameAccounts from './GameAccounts.svelte';
+  import Announcements from './Announcements.svelte';
+  import ThemeSwitch from './ThemeSwitch.svelte';
 
   let secret = '';
   let auth = {mode:'token',configured:false};
   let gameAccounts;
+  let announcements;
   let connected = false;
   let busy = false;
   let loadingAccount = false;
@@ -65,6 +68,7 @@
     { id: 'archive', label: '存档管理', mark: '05' },
     { id: 'activity', label: '操作记录', mark: '06' },
     { id: 'game-accounts', label: '账号管理', mark: '07' },
+    { id: 'announcements', label: '游戏公告', mark: '08' },
   ];
   const companions = [{ id: -1, name: '独自旅行' }, { id: 0, name: '壁虎同行' }, { id: 1, name: '刺猬同行' }, { id: 2, name: '萤火虫同行' }];
   const actionNames = { create: '创建账号', postcards: '下发明信片', mail: '寄送奖励邮件', role: '修改角色', weather: '设置天气', notes: '解锁笔记', import: '导入存档', 'visitor-depart': '访客离场', 'furniture-put': '放入工作台', 'furniture-take': '取出工作台物品', 'furniture-buy': '购买家具商品', 'furniture-replace': '摆放家具', 'furniture-advance': '检查制造进度', 'furniture-finish': '立即完成制造', 'neighbor-arrive': '邻居来访', 'neighbor-depart': '邻居离场' };
@@ -139,6 +143,7 @@
       status = state; accounts = list.accounts;
       if (selected) await loadAccount(selected);
       if (tab === 'game-accounts') await gameAccounts?.refresh();
+      if (tab === 'announcements') await announcements?.refresh();
       notice = '已获取服务器最新状态。';
     } catch (e) { error = e.message; } finally { busy = false; }
   }
@@ -215,6 +220,7 @@
 
 {#if !connected}
   <main class="login-page">
+    <div class="login-theme"><ThemeSwitch /></div>
     <div class="login-story">
       <div class="brand"><span class="brand-symbol">蛙</span><span>青蛙邮局<small>TRAVEL FROG · LOCAL ARCHIVE</small></span></div>
       <p class="eyebrow">给每一段旅途，留一个家</p>
@@ -254,11 +260,12 @@
     </aside>
     <main class="workspace">
       {#if snapshot?.official}<div class="notice" role="status">{#if snapshot.official.mode==='active'}测试模式：已解除只读，使用私服正常玩法逻辑；可随时从快照回档。原始官方记录仍保留。{:else}请先在“存档管理”创建快照，完成后自动解除只读。{#if snapshotPage.snapshots.length}<button class="secondary" disabled={busy} onclick={()=>mutate('archive-activate',{},'测试玩法已启用。')}>已有快照，启用玩法</button>{/if}{/if}</div>{/if}
-      <header class="topbar"><div><span class="breadcrumb">青蛙邮局 / {tabs.find(x => x.id === tab)?.label}</span><h1>{tabs.find(x => x.id === tab)?.label}</h1></div><div class="top-actions"><span class="online-label">{status.online || 0} 个客户端在线</span><button class="secondary" onclick={refresh} disabled={busy || loadingAccount}>{busy ? '处理中…' : '↻ 刷新状态'}</button></div></header>
+      <header class="topbar"><div><span class="breadcrumb">青蛙邮局 / {tabs.find(x => x.id === tab)?.label}</span><h1>{tabs.find(x => x.id === tab)?.label}</h1></div><div class="top-actions"><ThemeSwitch /><span class="online-label">{status.online || 0} 个客户端在线</span><button class="secondary" onclick={refresh} disabled={busy || loadingAccount}>{busy ? '处理中…' : '↻ 刷新状态'}</button></div></header>
       {#if error}<div class="notice error" role="alert">{error}<button class="text-button" onclick={() => error = ''}>关闭</button></div>{/if}
       {#if notice}<div class="notice success" role="status">{notice}<button class="text-button" onclick={() => notice = ''}>关闭</button></div>{/if}
       {#if !catalog.available}<div class="notice warning">APK 资源目录尚未配置，明信片、物品与笔记目录暂不可用。请在服务器设置 FROG_ASSETS。</div>{/if}
       {#if tab === 'game-accounts'}<GameAccounts bind:this={gameAccounts} bind:busy {selected} />
+      {:else if tab === 'announcements'}<Announcements bind:this={announcements} bind:busy />
       {:else if loadingAccount}<section class="empty-state"><div class="spinner"></div><h2>正在打开蛙的档案…</h2></section>
       {:else if !snapshot}<section class="empty-state"><span class="empty-illustration">✉</span><h2>先选一位旅人</h2><p>从左侧选择账号，或创建一个新的本地账号。</p></section>
       {:else}

@@ -1,6 +1,6 @@
 # 烹饪任务与故事赠礼
 
-`life.js` 为路线图第 7 项烹饪、第 5 项故事赠礼/反馈提供本地可运行流程。客户端配置与协议字段有静态依据，官方时间、概率和伙伴匹配不可见，相关近似规则在本文单列。隔离数据库测试通过，不代表原生页面与全部动画已经实机验证。
+`src/game/life/life.js` 为路线图第 7 项烹饪、第 5 项故事赠礼/反馈提供本地可运行流程。客户端配置与协议字段有静态依据，官方时间、概率和伙伴匹配不可见，相关近似规则在本文单列。隔离数据库测试通过，不代表原生页面与全部动画已经实机验证。
 
 ## 证据范围
 
@@ -51,7 +51,7 @@
 ## 接口与集成
 
 ```js
-const {LifeService}=require('./life');
+const {LifeService}=require('./src/game/life/life');
 const life=new LifeService(database,catalog,{
   clock:()=>Math.floor(Date.now()/1000),
   feedbackSeconds:600,
@@ -67,7 +67,7 @@ const life=new LifeService(database,catalog,{
 
 ## 验证
 
-`node --test life_test.js` 通过 8 项：
+`node --test tests/life_test.js` 通过 8 项：
 
 - 烹饪任务观察、主题、积分、跨周和月重置、每月食品仅一份。
 - 任务刷新不重复/不伪造进度，广告与分享明确拒绝。

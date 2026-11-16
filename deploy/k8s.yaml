@@ -118,7 +118,7 @@ spec:
     spec:
       containers:
       - name: admin
-        image: harbor.k8s.lan/library/travel-frog-admin:0.10.0
+        image: harbor.k8s.lan/library/travel-frog-admin:0.12.0
         imagePullPolicy: Always
         ports:
         - name: http

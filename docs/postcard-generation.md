@@ -2,7 +2,7 @@
 
 ## 配置、观察与边界
 
-`postcard_generator.js` 从部署时提供的 `config.eab`、`resources_json` 与可读取 PNG 素材建立构图目录；不会读写账号数据库，也不自动扫描私人备份。配置包含场景、背景/前景名称、青蛙与同行者姿态、中心坐标、地点等。真实存档样本由调用方明确传入，只提取图片编号、资源编号和图层坐标，不读取姓名、余额、邮件文字或凭据。
+`src/game/travel/postcard_generator.js` 从部署时提供的 `config.eab`、`resources_json` 与可读取 PNG 素材建立构图目录；不会读写账号数据库，也不自动扫描私人备份。配置包含场景、背景/前景名称、青蛙与同行者姿态、中心坐标、地点等。真实存档样本由调用方明确传入，只提取图片编号、资源编号和图层坐标，不读取姓名、余额、邮件文字或凭据。
 
 本次使用：`exports/oneplus-official-20261114-live/assets/eab/config.eab` 与 `exports/dog-apk-build/decoded/assets/game/js/main.min.js`。复用 REA 静态分析 Evidence `ev_54b142b4e7d9807890a683466175fa62c7c2902457d3d25867ff5872c41410e6`（本机包 `exports/rea-merchant-20261115.json`）。REA 对主脚本的语义图为部分覆盖，其余 16 个 JS 文件未分析；精确配置、图层与 PNG 尺寸来自单独的本地静态读取，不冒称为客户端运行证据。
 
@@ -36,7 +36,7 @@
 ## 接入
 
 ```js
-const {PostcardGenerator}=require('./postcard_generator');
+const {PostcardGenerator}=require('./src/game/travel/postcard_generator');
 const generator=new PostcardGenerator({
   root:catalog.root,
   config:catalog.config, // 也可省略，从 root/eab/config.eab 读取
@@ -58,6 +58,6 @@ const picture=generator.generate(postcardId,{
 
 ## 验证
 
-`node --test postcard_generator_test.js`：10项测试通过。原有中心坐标、合成同行者、半像素样本、工具/季节、坏随机源和缺图拒绝测试继续通过；新增同地完整替代、配置不变、跨地点拒绝、来源季节门槛、目标真实样本优先、来源样本优先、禁用近似，以及实际7目标全部可生成的回归。当前包全部382场景及可用同行组合逐一生成并校验资源可读。另将101个配置推导Goal角色图层坐标与官方捕获逐一比较，仍全部一致。无素材或官方捕获时对应项明确跳过。
+`node --test tests/postcard_generator_test.js`：10项测试通过。原有中心坐标、合成同行者、半像素样本、工具/季节、坏随机源和缺图拒绝测试继续通过；新增同地完整替代、配置不变、跨地点拒绝、来源季节门槛、目标真实样本优先、来源样本优先、禁用近似，以及实际7目标全部可生成的回归。当前包全部382场景及可用同行组合逐一生成并校验资源可读。另将101个配置推导Goal角色图层坐标与官方捕获逐一比较，仍全部一致。无素材或官方捕获时对应项明确跳过。
 
 本地另合成了 28 张跨类型图片接触表检查，位置见忽略目录 `exports/postcard-analysis/contact-sheet.png`。它证明可渲染性与代表性布局，不代替所有场景在 Android 客户端上的实际浏览。接入旅行后还需按路线图进行客户端收图、保存、重登和回档验证，才能勾选该项端到端完成。

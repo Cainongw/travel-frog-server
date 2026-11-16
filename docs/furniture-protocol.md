@@ -96,7 +96,7 @@
 
 ```js
 const { FurnitureService, migrateFurniture, exportFurnitureState,
-  importFurnitureState, validateFurnitureState } = require('./furniture');
+  importFurnitureState, validateFurnitureState } = require('./src/game/furniture/furniture');
 const furniture = new FurnitureService(database, catalog, {
   craftSeconds: 60,
   shopSeconds: 86400
@@ -132,7 +132,7 @@ const furniture = new FurnitureService(database, catalog, {
 ## 验证与仍需实机确认的部分
 
 ```powershell
-node --test furniture_test.js
+node --test tests/furniture_test.js
 ```
 
 十项隔离 SQLite 测试覆盖槽位分类、材料转移/归还不复制、可复用工具、不满足条件不制作、在外不制作、制作时锁定、到期只结算一次、正确事件编号、摆放回包、商人价格/前置/购买限制、跨重启与导入后离线结算、提前完成、事务失败回滚、非法导入、管理查询不写状态，以及配置临时缺失时不覆写待制作任务、不永久初始化空房间。

@@ -1,6 +1,6 @@
 # 花瓶插花、花期与自然图鉴
 
-`decoration.js` 补齐 `client_load_decorate` 和 `client_change_decorate`。这里的“装饰”实际指屋内花瓶中的插花，和普通家具摆放、户外种植花盆分别存储。
+`src/game/creative/decoration.js` 补齐 `client_load_decorate` 和 `client_change_decorate`。这里的“装饰”实际指屋内花瓶中的插花，和普通家具摆放、户外种植花盆分别存储。
 
 ## 客户端与配置确认的规则
 
@@ -26,7 +26,7 @@
 ## 接口
 
 ```js
-const {DecorationService}=require('./decoration');
+const {DecorationService}=require('./src/game/creative/decoration');
 const decoration=new DecorationService(database,catalog,{bloomSeconds:21600,lifeSeconds:172800});
 ```
 
@@ -34,12 +34,12 @@ const decoration=new DecorationService(database,catalog,{bloomSeconds:21600,life
 
 主服务应包装角色投影：`decoration.decorateRole(account,role)` 将 `role.frog.decoration` 更新为当前花材列表，防止后续角色同步把原生列表清空。成功响应后再发推送，避免客户端本地“减旧花、设置新花”回调覆盖权威状态。
 
-客户端旧 `MainInView.updateDecoration` 在空瓶时不会清空 `flower.source`，导致到期后残留旧图。本次 `client_policy_patch.js` 额外只包装这个实际方法：先执行原方法，再在无有效选中花材时清图，保留普通插花显示和返回值；重复追加安全。需要后续 APK 追加补丁并实机验证。
+客户端旧 `MainInView.updateDecoration` 在空瓶时不会清空 `flower.source`，导致到期后残留旧图。本次 `tools/android/patches/client_policy_patch.js` 额外只包装这个实际方法：先执行原方法，再在无有效选中花材时清图，保留普通插花显示和返回值；重复追加安全。需要后续 APK 追加补丁并实机验证。
 
 ## 验证与边界
 
-`node --test decoration_test.js` 六项通过：原始采集和仓库转花材不重复；花苞/开花/替换/到期闭环；非法和未拥有选择拒绝；重新建立服务与完整快照恢复；写入失败事务回滚；真实配置32种花材身份和蜡梅百科阶段图匹配。
+`node --test tests/decoration_test.js` 六项通过：原始采集和仓库转花材不重复；花苞/开花/替换/到期闭环；非法和未拥有选择拒绝；重新建立服务与完整快照恢复；写入失败事务回滚；真实配置32种花材身份和蜡梅百科阶段图匹配。
 
-`node --test client_policy_patch_test.js` 三项通过，额外覆盖空瓶残影清除、有效插花不被误清、原方法返回值和重复包装。
+`node --test tests/client_policy_patch_test.js` 三项通过，额外覆盖空瓶残影清除、有效插花不被误清、原方法返回值和重复包装。
 
 尚需主流程实机验证商人购花、花瓶选择、阶段图片、替换与到期清图，以及相应称号和百科推送。花期与丢弃策略属于明确近似，未声称恢复官方隐藏计时算法。

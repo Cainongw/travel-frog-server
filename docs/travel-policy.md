@@ -1,6 +1,6 @@
 # 旅行选择与道具消耗策略
 
-`travel_policy.js` 是无数据库依赖的本地策略模块。它消费 `PostcardGenerator` 的可生成场景，提供稳定路线编号、随机路线/同行选择、计时、奖励候选以及背包消耗/返还计划。它不自行修改存档或启动定时器，选择结果必须由调用方持久化，重启不得重新抽路线或重置时间。
+`src/game/travel/travel_policy.js` 是无数据库依赖的本地策略模块。它消费 `PostcardGenerator` 的可生成场景，提供稳定路线编号、随机路线/同行选择、计时、奖励候选以及背包消耗/返还计划。它不自行修改存档或启动定时器，选择结果必须由调用方持久化，重启不得重新抽路线或重置时间。
 
 ## 可确认的配置事实
 
@@ -23,7 +23,7 @@
 ## 接口
 
 ```js
-const {TravelPolicy}=require('./travel_policy');
+const {TravelPolicy}=require('./src/game/travel/travel_policy');
 const policy=new TravelPolicy({generator,config:catalog.config,random:Math.random});
 const selection=policy.select({
   bag:[2,1002,2003,2000],
@@ -45,6 +45,6 @@ const selection=policy.select({
 
 ## 测试
 
-`node --test travel_policy_test.js` 覆盖四格背包、消耗/返还、稳定路线编号、食物近远差异、方向偏好、工具场景限制、笔记前置、非法输入，以及真实素材目录下跨场景生成。统计测试使用固定随机种子，检查策略可观测的差异，而不是官方概率准确性。
+`node --test tests/travel_policy_test.js` 覆盖四格背包、消耗/返还、稳定路线编号、食物近远差异、方向偏好、工具场景限制、笔记前置、非法输入，以及真实素材目录下跨场景生成。统计测试使用固定随机种子，检查策略可观测的差异，而不是官方概率准确性。
 
 仍需核心旅行状态机接入并验证等待、出发、离线归来、重复请求、邮件/新图领取、保存与回档。此模块通过不代表路线图第 10 项已端到端完成。

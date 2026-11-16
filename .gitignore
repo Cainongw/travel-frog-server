@@ -2,7 +2,7 @@
 /Picture.json
 /resources.json
 /config.eab.json
-/decode_eab.js
+/tools/resources/decode_eab.js
 
 # Local overrides and logs.
 /data/*.local.json

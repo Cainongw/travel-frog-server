@@ -1,7 +1,7 @@
 # 原生抽奖协议核对
 
 分析对象为解压 APK 的 `assets/game/js/main.min.js` 与
-`assets/game/resource/China/eab/config.eab`。配置由 `catalog.js` 解码，未执行 APK 脚本。
+`assets/game/resource/China/eab/config.eab`。配置由 `src/core/catalog.js` 解码，未执行 APK 脚本。
 
 ## 已确认的客户端行为
 
@@ -21,10 +21,10 @@
 
 ## 接入
 
-`gameplay.js` 不导入 `database.js`，可以在持久层安全引用辅助方法：
+`src/game/raffle/gameplay.js` 不导入 `src/core/database.js`，可以在持久层安全引用辅助方法：
 
 ```js
-const { migrateGameplay, getGachaState, importGachaState, grantGachaCredits } = require('./gameplay');
+const { migrateGameplay, getGachaState, importGachaState, grantGachaCredits } = require('./src/game/raffle/gameplay');
 ```
 
 1. `FrogDatabase.migrate()` 创建 accounts 后调用 `migrateGameplay(this)`，创建独立 `gacha_state` 表。
@@ -35,7 +35,7 @@ const { migrateGameplay, getGachaState, importGachaState, grantGachaCredits } = 
 服务器创建服务：
 
 ```js
-const { GameplayService } = require('./gameplay');
+const { GameplayService } = require('./src/game/raffle/gameplay');
 const gameplay = new GameplayService(database, catalog);
 ```
 
@@ -63,7 +63,7 @@ case 'item_redeem_prize': {
 ## 验证
 
 ```powershell
-node --test gameplay_test.js
+node --test tests/gameplay_test.js
 ```
 
 覆盖扣 5 券且 pending 重发不重复消费、错误颜色/非法奖项拒绝、白球返券、跨账号隔离、库存结算中途失败回滚、免费机会一次性消费、资料缺失不扣券、待兑球跨重启保留、导入状态验证，以及本地 APK 的 6 色奖项配置完整性。所有测试使用内存库或单独临时 SQLite，不触碰真实存档。
