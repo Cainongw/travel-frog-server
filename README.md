@@ -2,9 +2,11 @@
 
 This Node.js server provides local gameplay and a SQLite-backed personal archive for the China edition of Travel Frog. The Svelte 5 management UI is built with Vite; optional OAuth/OIDC uses openid-client.
 
-v0.10 将管理台拆为独立 Docker 镜像/Deployment/Service，增加游戏登录账号管理，以及 Android 原生登录与自动恢复会话。游戏仍共用单实例 SQLite 服务。[部署与登录配置](docs/deployment.md)；[原生登录构建与证据](docs/native-login.md)；后续逐项完善见 [复刻路线待办](docs/replication-roadmap.md)。OAuth 使用 `openid-client`，其余游戏服务采用 Node 内置库。
+v0.12 开发版加入配置驱动明信片/旅行、创作与庭院、动态照片/贺卡/扭蛋/探索等活动、烹饪故事、日历任务、称号图鉴、礼包与插花。隐藏概率、配方、计时等近似策略及原生验收进度见 [复刻路线待办](docs/replication-roadmap.md)，尚未将整份路线图标成完成。
 
-## Svelte 管理台（v0.10）
+管理台继续采用独立 Docker 镜像、Authentik 登录和游戏账号管理，APK 使用 Android 原生登录与自动续期。[部署与登录配置](docs/deployment.md)；[原生登录构建与证据](docs/native-login.md)。OAuth 使用 `openid-client`，其余游戏服务采用 Node 内置库。
+
+## Svelte 管理台
 
 在 `private_server` 目录运行（完整构建建议 Node.js 22.12+）：
 

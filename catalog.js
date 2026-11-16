@@ -57,10 +57,11 @@ function readBundleAsset(filename,name){
 
 function loadCatalog(root = process.env.FROG_ASSETS || path.join(__dirname, '..', '旅行青蛙·中国之旅', 'assets', 'game', 'resource', 'China')) {
   const filename = path.join(root, 'eab', 'config.eab');
-  if (!fs.existsSync(filename)) return { available: false, items: [], pictures: [], notes: [], resources: {}, furniture: [], furnitureShop: [], bench: [], neighbors: [], specialties: [], root };
+  if (!fs.existsSync(filename)) return { available: false, config:{}, items: [], pictures: [], notes: [], resources: {}, furniture: [], furnitureShop: [], bench: [], neighbors: [], specialties: [], root };
   const config = readBundle(filename);
   return {
     available: true, root,
+    config,
     items: Object.values(config.Item_json || {}),
     pictures: Object.values(config.Picture_json || {}),
     notes: Object.values(config.Note_json || {}),

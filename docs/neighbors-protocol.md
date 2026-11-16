@@ -67,18 +67,21 @@ unclaimed gift while a neighbor is present; the client gift icon is independent.
 The official arrival algorithm, cooldown enforcement and reward distribution
 were not recovered. The offline server chooses these explicit rules:
 
-- Round-robin neighbor ids `0,1,2`, default stay 1800 seconds, cooldown 21600 seconds.
+- First visit is `0` for onboarding; later identities are randomly sampled from `0,1,2`, rather than rotated. Default stay 1800 seconds, cooldown 21600 seconds. After cooldown, evaluate a 10% arrival chance once per 1800 seconds; a failed check persists its next-check time, so repeated login/polling cannot reroll every second. These values also appear in client `FRIEND_VISIT_RNDPER/RNDSEC/COOL`, but the server's original scheduler has not been recovered.
 - Do not generate a neighbor while a province visitor is still present.
 - Only owned items of type `3` present in Specialty_json with a valid taste entry can be fed.
 - Consume one item transactionally and permit only one feeding per visit.
 - No feeding means no gift. A fed neighbor deposits a type `3` gift mail on departure.
 - Taste `>=80`: 80 clover + 1 ticket; `>=60`: 50 clover; `>=20`: 30 clover; otherwise 20 clover.
+- `rewardTable` can configure feeling thresholds and clover/ticket ranges. A stable hash of account and committed visit fields selects within those ranges, keeping the same reward through retries and process restarts. Default point ranges retain the amounts above; reward ranges are local policy, not confirmed official distributions.
 - Mail rewards are awarded only by the existing `mail_open` settlement, not at departure.
 - A late login settles one outstanding visit and starts its cooldown at settlement time.
   It does not simulate years of missed visits or issue accumulated historical gifts.
 
 The above amounts are project choices. Only the taste values, response thresholds,
 mail rendering and wire fields are supported by the listed static client evidence.
+
+The enhanced `NeighborService` additionally accepts `random`, `arrivalChance`, `checkSeconds`, `firstNeighborId` (`null` randomizes even the first visit), and `rewardTable:[{feeling,clover:[min,max],ticket:[min,max]}]`. Tests inject a random source and arrivalChance 1 for deterministic business flows, with separate tests for missed-check persistence and stable configurable rewards. The existing schema stores all authoritative arrival/departure times; no new account-table columns were introduced for this change.
 
 ## Module integration
 

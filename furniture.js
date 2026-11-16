@@ -1,9 +1,11 @@
 'use strict';
+const crypto=require('node:crypto');
 
 const normalizeAccount = value => String(value || 'guest').trim().slice(0, 128) || 'guest';
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 const clone = value => JSON.parse(JSON.stringify(value));
 const STYLE_MATERIAL = Object.freeze({ 2:10101, 3:10102, 4:10103, 5:10104, 6:10105, 7:10106, 8:10107, 9:10108 });
+const {buildFurnitureRecipes,beginFurnitureCraft}=require('./furniture_policy');
 
 function migrateFurniture(database) {
   database.db.exec(`CREATE TABLE IF NOT EXISTS furniture_state (
@@ -85,7 +87,7 @@ class FurnitureService {
     this.shopSeconds = integer(options.shopSeconds ?? 86400, 'shop duration', 60, 2592000);
     this.items = new Map((catalog.items || []).map(x=>[x.id,x]));
     this.furniture = new Map((catalog.furniture || []).map(x=>[x.id,x]));
-    this.shop = new Map((catalog.furnitureShop || []).filter(x=>[10,11,12,13].includes(this.items.get(x.item_id)?.type)).map(x=>[x.id,x]));
+    this.shop = new Map((catalog.furnitureShop || []).filter(x=>x.type!==998&&[0,1,5,8,10,11,12,13,14,15].includes(this.items.get(x.item_id)?.type)).map(x=>[x.id,x]));
     const buildable = new Set((catalog.bench || []).filter(x=>x.type===1).map(x=>x.id));
     this.tools = [...this.items.values()].filter(x=>x.type===12).map(x=>x.id);
     this.recipes = [...this.furniture.values()].filter(x=>buildable.has(x.id) && STYLE_MATERIAL[x.style] && this.items.has(x.drawing) && this.items.has(STYLE_MATERIAL[x.style]) && this.items.has(10001)).map(x=>({
@@ -94,6 +96,7 @@ class FurnitureService {
       tool:[...this.tools], time:this.craftSeconds, area:x.type, type:x.type, style:x.style, resource:x.res || [],
     })).sort((a,b)=>a.id-b.id);
     this.available = this.recipes.length > 0 && this.tools.length > 0;
+    if(catalog.config){this.recipes=buildFurnitureRecipes(catalog,{craftSeconds:this.craftSeconds});this.available=this.recipes.length>0;}
     migrateFurniture(database);
   }
 
@@ -156,13 +159,27 @@ class FurnitureService {
     return {
       has_fur:[...state.owned],put_fur:clone(state.placed),replace_fur:[],bench:[...state.bench],bench_lock:!!state.job,
       mate_list:[],mood:3,
-      shop:{start_time:state.shop_start,leave_time:state.shop_end,shop_list:[...this.shop.values()]
-        .filter(row=>!row.has_item || this.ownedItem(account,state,row.has_item)>0)
+      shop:{start_time:state.shop_start,leave_time:state.shop_end,shop_list:this.offers(account,state)
         // The native merchant renderer resolves its image/name from item_id;
         // shop_id alone is only enough for the purchase RPC.
         .map(row=>({shop_id:row.id,item_id:row.item_id,num:this.remaining(state,row)}))},
       job:state.job ? clone(state.job) : null,
     };
+  }
+
+  offers(account,state){
+    const eligible=[...this.shop.values()].filter(row=>!row.has_item||this.ownedItem(account,state,row.has_item)>0);
+    if(eligible.length<=24)return eligible;
+    // Offline policy: fixed offers during one visit, then rotate. Configuration
+    // proves item/price/predecessor; it does not contain the official stock draw.
+    const score=row=>crypto.createHash('sha256').update(account+':'+state.shop_start+':'+row.id).digest().readUInt32BE(0);
+    const order=eligible.map(row=>({row,score:score(row)})).sort((a,b)=>a.score-b.score).map(x=>x.row);
+    const selected=[];for(const type of [5,10,11,12,13,15,14,0,1,8]){const candidate=order.find(row=>this.items.get(row.item_id)?.type===type);if(candidate)selected.push(candidate);}
+    // The two flowering branches are regular merchandise and provide the
+    // natural source for flower arrangement, growth and their four titles.
+    for(const id of [8,9]){const row=eligible.find(x=>x.id===id);if(row&&!selected.some(x=>x.id===id))selected.push(row);}
+    for(const row of order)if(selected.length<24&&!selected.some(x=>x.id===row.id))selected.push(row);
+    return selected.sort((a,b)=>a.id-b.id);
   }
 
   put(value,pos,itemId,now = nowSeconds()) {
@@ -204,8 +221,12 @@ class FurnitureService {
       const state=this.load(account,now), row=this.shop.get(shopId), role=this.database.getRole(account);
       const fail=reason=>({ok:false,code:1,reason,itemChanges:[],clover:role.res.clover_point});
       if (!row || !Number.isSafeInteger(shopId)) return fail('Unknown furniture shop item');
+      if(!this.offers(account,state).some(x=>x.id===shopId))return fail('Merchant is not offering this item during this visit');
       if (row.has_item && this.ownedItem(account,state,row.has_item)<1) return fail('Shop prerequisite not owned');
       if (this.remaining(state,row)<1) return fail('Shop purchase limit reached');
+      const item=this.items.get(row.item_id),held=this.database.getItemState(account);
+      const owned=this.ownedItem(account,state,row.item_id)+[...held.bag,...held.desk].filter(id=>id===row.item_id).length;
+      if(item?.spend!==1&&Number(item?.own_num)>0&&owned>=Number(item.own_num))return fail('Item ownership limit reached');
       if (role.res.clover_point<row.price) return fail('Not enough clover');
       const clover=role.res.clover_point-row.price;
       this.database.updateAccount(account,{clover});
@@ -237,6 +258,7 @@ class FurnitureService {
         return {ok:true,code:0,changed:true,completed:id,itemChanges:[],event:this.event(account,21,id,now)};
       }
       if (!this.available || this.database.getRole(account).frog.status!==0) return {ok:true,code:0,changed:false,itemChanges:[]};
+      if(this.catalog.config)return beginFurnitureCraft(this,account,now);
       const tools=state.bench.slice(0,5).filter(id=>id>=0&&this.database.getInventoryCount(account,id)>0);
       if (!tools.length) return {ok:true,code:0,changed:false,itemChanges:[]};
       const recipe=this.recipes.find(x=>!state.owned.includes(x.id) && this.database.getInventoryCount(account,x.paper_item_id)>0 &&

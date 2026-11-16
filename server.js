@@ -18,6 +18,19 @@ const { NeighborService, guestProtocol } = require('./neighbors');
 const { ProtocolDiagnostics, describe } = require('./protocol_diagnostics');
 const { AdminAuth } = require('./admin_auth');
 const { GameAuth } = require('./game_auth');
+const { ProgressionService } = require('./progression');
+const { ActivitiesService } = require('./activities');
+const { CreativeService } = require('./creative');
+const { PostcardGenerator } = require('./postcard_generator');
+const { TravelPolicy } = require('./travel_policy');
+const { CardsService } = require('./cards');
+const { LifeService } = require('./life');
+const { ExplorationService } = require('./exploration');
+const { EconomyPolicy } = require('./economy_policy');
+const { DailyService } = require('./daily');
+const { WorldService } = require('./world');
+const { GiftsService } = require('./gifts');
+const { DecorationService } = require('./decoration');
 
 const HOST = process.env.FROG_HOST || '0.0.0.0';
 const PORT = Number(process.env.FROG_PORT || 8080);
@@ -51,6 +64,59 @@ const diagnostics = new ProtocolDiagnostics(database);
 const adminAuth = new AdminAuth(database);
 const gameAuth = new GameAuth(database);
 const GAME_AUTH_REQUIRED = process.env.FROG_GAME_AUTH_REQUIRED === '1';
+const progression = new ProgressionService(database,catalog);
+const activities = new ActivitiesService(database,catalog,{furniture});
+const creative = new CreativeService(database,catalog);
+const cards = new CardsService(database,catalog,{furniture});
+const life = new LifeService(database,catalog);
+const exploration = new ExplorationService(database,catalog,{furniture,pictureFactory:({account,pic_ids})=>{if(!policy())return null;const eligible=pic_ids.filter(id=>postcardGenerator.coverage().rows.some(x=>x.id===id&&x.available));return eligible.length?postcardGenerator.generate(database.nextPostcardId(account),{picId:eligible[0],preview:true}):null;}});
+const economy=new EconomyPolicy({catalog});
+const daily=new DailyService(database,catalog);
+const world=new WorldService(database,catalog,{economy});
+const gifts=new GiftsService(database,catalog);
+const decoration=new DecorationService(database,catalog);
+const undecoratedRole=database.getRole.bind(database);
+database.getRole=account=>decoration.decorateRole(account,undecoratedRole(account));
+furniture.shop=new Map([...furniture.shop].filter(([,row])=>gifts.supportsShopItem(row.item_id)));
+if(catalog.config?.shopData_json&&process.env.FROG_TRAVEL_POLICY!=='legacy')database.economy=economy;
+admin.services.creative=creative;
+const gameModules = [world,gifts,decoration,progression,activities,cards,creative,life,exploration,daily];
+let postcardGenerator,travelPolicy;
+function policy(){
+  if(catalog.pictures.length>20&&process.env.FROG_TRAVEL_POLICY!=='legacy'){
+    if(!postcardGenerator){
+      const samples=[];for(const row of database.db.prepare('SELECT data_json FROM official_archives').all()){
+        const capture=JSON.parse(row.data_json).capture;for(const frames of Object.values(capture?.responses||{}))for(const frame of frames)for(const field of ['pic_list','pictures'])if(Array.isArray(frame.data?.[field]))samples.push(...frame.data[field]);
+      }
+      postcardGenerator=new PostcardGenerator({root:catalog.root,config:catalog.config,samples});
+    }
+    travelPolicy ||= new TravelPolicy({generator:postcardGenerator,config:catalog.config});
+  }
+  return travelPolicy;
+}
+function generateTravelPostcard(route,companion,id,context={}){
+  if(policy())return postcardGenerator.generate(id,{picId:route.picId,companionId:companion,season:context.season,tools:(context.bag||[]).filter(x=>catalog.items.find(i=>i.id===x)?.type===2)});
+  return makePostcard(route,companion,id);
+}
+function furnitureState(account){return creative.decorateFurnitureState(account,furniture.getState(account));}
+function startPlannedTravel(account){
+  const current=database.getItemState(account),context={bag:current.bag,season:database.getWeather(account).season,ownedNoteIds:database.getTravelNotes(account).map(x=>x.id),seenPicIds:database.getPostcards(account,'album').map(x=>x.pic_id)};
+  if(process.env.FROG_TRIP_SECONDS)context.durationSeconds=TRIP_SECONDS;
+  const plan=policy().select(context);
+  return database.transaction(()=>{const started=database.startTravel(account,plan.route,plan.companionId,plan.durationSeconds);if(started.ok){const state=database.modules.get(account,'world',{});const desk_loans=(state.borrowed||[]).filter(x=>current.bag[x.bag-1]===x.item_id);state.borrowed=[];database.modules.set(account,'world',state);database.modules.set(account,'travel-plan',{...plan,desk_loans,trip_number:started.trip.trip_number});const progress=progression.record(account,'trip-start',{food:current.bag[0]});started.events=[...(progress.events||[]),...life.observe(account,'travel').events,...daily.observe(account,'travel',1,{food:current.bag[0],fullBag:current.bag.every(x=>x>=0)}).events];}return started;});
+}
+function advanceTravel(account){
+  const result=database.advanceTravel(account,policy()?policy().routes():TRAVEL_ROUTES,generateTravelPostcard);
+  if(result)progression.record(account,'trip-return',{duration:result.durationSeconds,place:catalog.pictures.find(x=>x.id===result.postcard.pic_id)?.place});
+  if(!result&&policy()&&!database.getTravelState(account)&&database.getRole(account).frog.status===0){
+    const pending=database.modules.get(account,'travel-plan',{}),now=nowSeconds();
+    if(pending.depart_at&&pending.depart_at<=now&&database.getItemState(account).bag_completed){
+      const started=startPlannedTravel(account);if(started.ok)for(const client of clients)if(client.synced&&client.account===account){sendEvent(client,'client_load_role',database.getRole(account));sendEvent(client,'item_load_items',database.getItemState(account));const event=database.getTravelEvents(account).find(x=>x.id===started.eventId);if(event)sendEvent(client,'notify_new_event',{event});moduleEvents(client,started);}
+    }
+  }
+  return result;
+}
+function moduleEvents(client,result){for(const event of result?.events||[])sendEvent(client,event.cmd,event.cmd==='furniture_load_furniture'?creative.decorateFurnitureState(client.account,event.data):event.data);}
 const ADMIN_TOKEN = process.env.FROG_ADMIN_TOKEN || '';
 if (ADMIN_TOKEN && ADMIN_TOKEN.length < 24) throw Error('FROG_ADMIN_TOKEN must be at least 24 characters');
 const UI_ROOT = path.join(__dirname, 'admin-ui', 'dist');
@@ -176,12 +242,18 @@ function pushInitialState(client) {
     return;
   }
   const sent = new Set();
+  database.normalizeEquipment(account);
+  progression.record(account,'login');
+  const moduleInitial=new Map(gameModules.flatMap(service=>service.initial(account)).map(x=>[x.cmd,x.data]));
+  // Module advancement may award inventory before a trip settles. The complete
+  // baseline below must always win over those earlier absolute resource pushes.
+  const liveBaseline=new Set(['client_load_role','item_load_items','album_load_all','album_load_new','album_load_recover','travel_load_gift','travel_load_note','mail_load','weather_load','clover_load_clovers','client_load_events','item_load_handbook','furniture_load_furniture']);
   function emit(cmd,data,retainOriginal=false){
     sent.add(cmd);
-    sendEvent(client,cmd,retainOriginal && Object.hasOwn(official?.protocols||{},cmd)?official.protocols[cmd]:data);
+    sendEvent(client,cmd,!liveBaseline.has(cmd)&&moduleInitial.has(cmd)?moduleInitial.get(cmd):retainOriginal && Object.hasOwn(official?.protocols||{},cmd)?official.protocols[cmd]:data);
   }
-  database.advanceTravel(account, TRAVEL_ROUTES, makePostcard);
-  furniture.advance(account);
+  advanceTravel(account);
+  if(!creative.isBenchLocked(account))furniture.advance(account);
   database.getVisitorState(account, nowSeconds(), VISIT_SECONDS);
   neighbors.sync(account);
   emit('weather_load', database.getWeather(account));
@@ -204,7 +276,7 @@ function pushInitialState(client) {
   emit('misc_moment_load', { list: database.getMoments(account) });
   emit('encyclopedia_load', database.getEncyclopedia(account));
   emit('visit_load', database.getVisitorState(account, nowSeconds(), VISIT_SECONDS));
-  emit('furniture_load_furniture', furniture.getState(account));
+  emit('furniture_load_furniture', furnitureState(account));
   emit('guest_load', guestProtocol(neighbors.state(account)));
   emit('furniture_load_tumbler', { show_index: 0, replace_index: 0, tumbler_list: [] },true);
   emit('furniture_load_compost', {
@@ -219,6 +291,7 @@ function pushInitialState(client) {
   emit('museum_load', { museum_list: [] },true);
   emit('wishingpool_load', {},true);
   emit('adsmgr_load', { can_pop: false, can_banner: false, day_left: 0, gift_id: 0, gift_time: 0, gift_can_get: 0, gift_get: 0, item_list: [] });
+  for(const [cmd,data]of moduleInitial)if(!sent.has(cmd)&&!['clover_update','item_update','item_update_ticket','notify_new_mail'].includes(cmd))emit(cmd,data);
   for(const [cmd,data]of Object.entries(official?.protocols||{})){
     if(sent.has(cmd)||cmd==='client_load_all_info'||cmd==='album_load_by_id_list'||!cmd.includes('load'))continue;
     sendEvent(client,cmd,data);
@@ -237,7 +310,7 @@ function pushRoleResources(client, state) {
 
 function pushFurnitureState(client, result) {
   pushRoleResources(client, result);
-  sendEvent(client, 'furniture_load_furniture', furniture.getState(client.account));
+  sendEvent(client, 'furniture_load_furniture', furnitureState(client.account));
   if (result.event) sendEvent(client, 'notify_new_event', {event:result.event});
 }
 
@@ -290,13 +363,19 @@ function settleConnectedTrips() {
     }
   }
   for (const [account, accountClients] of accounts) {
+    try{
     if(database.isOfficialReadOnly(account))continue;
-    const result = database.advanceTravel(account, TRAVEL_ROUTES, makePostcard);
+    for(const service of gameModules)if(service.advance){
+      try{const result=service.advance(account);if(service===creative&&result.changed)result.events.push({cmd:'furniture_load_furniture',data:furnitureState(account)});for(const client of accountClients)moduleEvents(client,result);}
+      catch(error){console.error('Module advance failed:',service.constructor.name,error.message);diagnostics.record(account,'internal_module_advance',{module:service.constructor.name},'handler_error');}
+    }
+    const result = advanceTravel(account);
     if (result) for (const client of accountClients) pushTravelCompletion(client, result);
-    const made = furniture.advance(account);
+    const made = creative.isBenchLocked(account)?{changed:false}:furniture.advance(account);
     if (made.changed) for (const client of accountClients) pushFurnitureState(client,made);
     const neighbor = neighborAction(account,()=>neighbors.sync(account));
     if (neighbor.changed) for (const client of accountClients) pushNeighborState(client,neighbor);
+    }catch(error){console.error('Account advance failed:',account,error.message);diagnostics.record(account,'internal_account_advance',{},'handler_error');}
   }
 }
 
@@ -312,6 +391,11 @@ function commandData(client, request) {
     if(/^(client_set_|client_switch_)/.test(request.cmd))return {code:0};
     return unsupported(client,request,'archive_readonly');
   }
+  for(const service of gameModules)if((service.commands||service.handledCommands).has(request.cmd)){
+    const result=service.handle(account,request.cmd,data);
+    afterGameReply(client,()=>{moduleEvents(client,result);const progress=progression.sync(account);moduleEvents(client,progress);if(progress.earned.length)sendEvent(client,'client_load_role',database.getRole(account));});
+    return result.response;
+  }
   switch (request.cmd) {
     case 'client_load_role':return database.getRole(account);
     case 'client_load_events':return database.getTravelEvents(account);
@@ -322,11 +406,12 @@ function commandData(client, request) {
     case 'client_set_client_envinfo':
     case 'hall_report_remote_addr':return {code:0};
     case 'furniture_load_furniture':
-      return furniture.getState(account);
+      return furnitureState(account);
     case 'furniture_putin_bench':
     case 'furniture_takeout_bench':
     case 'furniture_buy_shop':
     case 'furniture_replace_fur': {
+      if(['furniture_putin_bench','furniture_takeout_bench'].includes(request.cmd)&&creative.isBenchLocked(account))return {code:1,message:'不倒翁正在制作，工作台已锁定'};
       const result = request.cmd === 'furniture_putin_bench' ? furniture.put(account,data.pos,data.id)
         : request.cmd === 'furniture_takeout_bench' ? furniture.take(account,data.pos)
         : request.cmd === 'furniture_buy_shop' ? furniture.buy(account,data.shop_id) : furniture.replace(account,data.id);
@@ -516,7 +601,7 @@ function commandData(client, request) {
       return { code: result.ok ? 0 : 1 };
     }
     case 'item_buy': {
-      const shopItem = SHOP_ITEMS.get(Number(data.shop_id));
+      const shopItem = database.economy?economy.shop.get(Number(data.shop_id)):SHOP_ITEMS.get(Number(data.shop_id));
       if (!shopItem) return false;
       const purchase = database.purchase(account, shopItem);
       if (!purchase.ok) return false;
@@ -549,14 +634,23 @@ function commandData(client, request) {
     case 'item_set_bag_completed': {
       if (database.getTravelState(account)) return { code: 0 };
       database.setBagCompleted(account, data.completed);
+      if(policy()){
+        const state=database.modules.get(account,'travel-plan',{});
+        if(!data.completed){delete state.depart_at;database.modules.set(account,'travel-plan',state);return {code:0};}
+        if(catalog.items.find(x=>x.id===database.getItemState(account).bag[0])?.type!==0){database.setBagCompleted(account,false);return {code:1,message:'请准备旅行食物'};}
+        if(!state.depart_at)database.modules.set(account,'travel-plan',{depart_at:nowSeconds()+policy().homeWait()});
+        return {code:0};
+      }
       if (data.completed) {
         const selection = selectTrip(database.getTripCount(account) + 1);
+      const tripFood=database.getItemState(account).bag[0];
         const started = database.startTravel(account, selection.route, selection.companionId, TRIP_SECONDS);
         if (!started.ok) {
           database.setBagCompleted(account, false);
           sendEvent(client, 'item_load_items', database.getItemState(account));
           return { code: 1, message: started.reason };
         }
+        progression.record(account,'trip-start',{food:tripFood});
         sendEvent(client, 'client_load_role', database.getRole(account));
         sendEvent(client, 'item_load_items', database.getItemState(account));
         const event = database.getTravelEvents(account).find(item => item.id === started.eventId);
@@ -608,7 +702,12 @@ function handleMessage(client, text) {
     sendResponse(client,request,{code:1,message:'请先登录'});return;
   }
   console.log(`[${client.remote}] ${cmd}${request.data ? ` ${JSON.stringify(describe(request.data))}` : ''}`);
+  let replied=false;
   try {
+    const observedActions=new Set(['clover_harvest','clover_harvest_resend','item_putin_bag','item_putin_desk','travel_bag_to_gift','item_buy','furniture_buy_shop','item_set_bag_completed','guest_lock_bag','guest_serve','item_gacha','item_redeem_prize','album_save_new']);
+    const fingerprint=()=>JSON.stringify({role:database.db.prepare('SELECT clover,ticket,trip_count,bag_completed,bag_json,desk_json FROM accounts WHERE account=?').get(client.account),items:database.getItemState(client.account),pictures:database.db.prepare('SELECT id,location FROM postcards WHERE account=? ORDER BY id').all(client.account),plots:database.getCloverPlots(client.account),creative:database.modules.get(client.account,'creative',{})});
+    const before=client.authed&&observedActions.has(cmd)?fingerprint():null;
+    const previousClover=before?database.ensureAccount(client.account).clover:null;
     const response = commandData(client, request);
     if (cmd === 'client_load_all_info') {
       // Push state before acknowledging the synchronization request so the
@@ -619,12 +718,25 @@ function handleMessage(client, text) {
       return;
     }
     sendResponse(client, request, response);
+    replied=true;
     for (const callback of client.afterResponse || []) callback();
     client.afterResponse = [];
+    let committed=before!==null&&before!==fingerprint()&&(response?.code===0||Array.isArray(response));
+    if(committed&&cmd==='guest_lock_bag')committed=JSON.parse(before).creative?.drawing?.state===2&&database.modules.get(client.account,'creative',{}).drawing?.state===3;
+    if(committed&&cmd==='item_set_bag_completed')committed=!JSON.parse(before).role.bag_completed&&!!request.data?.completed;
+    if(client.authed&&(committed||cmd==='hall_login'&&response?.code===0)){
+      for(const service of [activities,cards,exploration])moduleEvents(client,service.observe(client.account,cmd,request.data||{}));
+      const lifeType={hall_login:'login',guest_serve:'feed',album_save_new:'photo',item_redeem_prize:'redeem'}[cmd];if(lifeType)moduleEvents(client,life.observe(client.account,lifeType));
+      const dailyType={guest_serve:'feed',item_redeem_prize:'redeem',item_putin_desk:'desk'}[cmd];if(dailyType)moduleEvents(client,daily.observe(client.account,dailyType,1,{guest:request.data?.id,full:database.getItemState(client.account).desk.every(x=>x>=0)}));
+      const earnedClover=previousClover===null?0:database.ensureAccount(client.account).clover-previousClover;if(earnedClover>0)moduleEvents(client,life.observe(client.account,'clover',earnedClover));
+      if(earnedClover>0)moduleEvents(client,daily.observe(client.account,'clover',earnedClover));
+      const progress=progression.sync(client.account);moduleEvents(client,progress);if(progress.earned.length)sendEvent(client,'client_load_role',database.getRole(client.account));
+    }
   } catch (error) {
     client.afterResponse = [];
     console.error(`[${client.remote}] ${cmd} failed: ${error.message}`);
-    sendResponse(client, request, { code: 1, message: error.message });
+    diagnostics.record(client.account,cmd,request.data||{},replied?'post_reply_error':'handler_error');
+    if(!replied)sendResponse(client, request, { code: 1, message: error.message });
   }
 }
 

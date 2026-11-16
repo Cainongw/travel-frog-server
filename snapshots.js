@@ -9,7 +9,7 @@ const SAVE_TABLES = Object.freeze([
   'achievements', 'encyclopedia_unlocks', 'encyclopedia_show_sub', 'gift_specialties',
   'inventory', 'shop_purchases', 'clover_plots', 'mails', 'travel_trips', 'travel_events',
   'visitor_state', 'visitor_acquire', 'gacha_state', 'furniture_state', 'neighbor_state',
-  'official_archives',
+  'official_archives', 'game_module_state',
 ]);
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 
@@ -92,7 +92,10 @@ class SnapshotService {
       if (hash(source.payload_json) !== source.sha256) throw Error('Snapshot checksum mismatch; restore refused');
       const payload = JSON.parse(source.payload_json);
       if (payload.format !== 'frog-account-snapshot' || payload.version !== 1 || payload.account !== account ||
-          Object.keys(payload.tables || {}).length !== SAVE_TABLES.length || payload.tables.accounts?.length !== 1) throw Error('Unsupported snapshot structure');
+          Object.keys(payload.tables || {}).some(x=>!SAVE_TABLES.includes(x)) || payload.tables.accounts?.length !== 1) throw Error('Unsupported snapshot structure');
+      // v0.10 checkpoints predate module state. Their absence means no progress
+      // in the new modules; never mutate the saved payload or its checksum.
+      if(!Object.hasOwn(payload.tables,'game_module_state'))payload.tables.game_module_state=[];
       const columns = new Map();
       for (const table of SAVE_TABLES) {
         const names = this.sql.prepare(`PRAGMA table_info(${table})`).all().map(x=>x.name);

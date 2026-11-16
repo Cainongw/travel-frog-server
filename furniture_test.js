@@ -37,6 +37,14 @@ function kit(database,account='frog'){
   for(const id of [10201,10301,10101,10001])database.changeInventory(account,id,1);
 }
 
+test('real merchant offers stay stable within a visit, include ordinary flower sources and never expose advertising claims',t=>{
+ const root=path.join(__dirname,'exports/oneplus-official-20261114-live/assets');if(!fs.existsSync(path.join(root,'eab/config.eab'))){t.skip('private client assets optional');return;}
+ const c=require('./catalog').loadCatalog(root),db=new FrogDatabase(':memory:');t.after(()=>db.close());const service=new FurnitureService(db,c,{shopSeconds:120});
+ const first=service.getState('merchant',100).shop.shop_list;assert.equal(first.length,24);assert.deepEqual(service.getState('merchant',101).shop.shop_list,first);
+ for(const id of [8,9])assert.ok(first.some(x=>x.shop_id===id));for(const row of first){assert.ok(c.items.some(x=>x.id===row.item_id));assert.notEqual(c.furnitureShop.find(x=>x.id===row.shop_id).type,998);}
+ const second=service.getState('merchant',221).shop.shop_list;assert.notDeepEqual(first.map(x=>x.shop_id),second.map(x=>x.shop_id));assert.ok(second.some(x=>x.shop_id===8));
+});
+
 test('native workbench has ten slots and separates reusable tools from reserved materials',t=>{
   const {database,service}=setup(t);
   kit(database);

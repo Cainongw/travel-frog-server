@@ -29,7 +29,7 @@ function createAssets(directory) {
   }
   const entries = {
     Item_json: [...[0, 1000, 2000, 3000].map(id => ({ id, name: `Test item ${id}`, type: id === 3000 ? 3 : 0 })),
-      ...[[10001,10],[10101,11],[10201,12],[10301,13]].map(([id,type])=>({id,type,name:`Craft ${id}`}))],
+      ...[[10001,10],[10003,10],[10101,11],[10201,12],[10202,12],[10301,13]].map(([id,type])=>({id,type,name:`Craft ${id}`}))],
     Picture_json: TRAVEL_ROUTES.map(x => ({ id: x.picId, name: x.destination })),
     Note_json: { 1000: { id: 1000, type: 1 }, 1001: { id: 1001, type: 1 } },
     resources_json: resources,
@@ -395,6 +395,7 @@ test('snapshot unlocks imported account, mutations and travel progress, unsuppor
     furniture_load_furniture:{bench:Array(10).fill(-1),bench_lock:false,has_fur:[1001],put_fur:[{id:1001,type:1}],shop:{start_time:100,leave_time:200}},
     clover_load_clovers:[],weather_load:{season:1,hours_type:1,weather:1},mail_load:{},
     furniture_load_flowerpot:{list:[401],plant_list:[],show_index:1},
+    qa_load_history:{entries:[1]},
   };
   const capture={format:'frog-official-protocol-capture',complete:true,finished_at:200000,account:'source-user',responses:Object.fromEntries(Object.entries(raw).map(([cmd,data])=>[cmd,[{data,time:150000}]]))};
   const save=require('./official_import').convertCapture(capture);
@@ -403,7 +404,8 @@ test('snapshot unlocks imported account, mutations and travel progress, unsuppor
   const checkpoint=await post(account,'snapshot-create',{label:'测试前'});assert.equal(checkpoint.activated,true);
   const client=await connect(account);
   assert.equal(client.events.find(x=>x.cmd==='client_load_role').data.frog.status,0);
-  assert.deepEqual(client.events.find(x=>x.cmd==='furniture_load_flowerpot').data,raw.furniture_load_flowerpot,'static unimplemented state remains visible');
+  assert.deepEqual(client.events.find(x=>x.cmd==='qa_load_history').data,raw.qa_load_history,'static unimplemented state remains visible');
+  assert.deepEqual(client.events.find(x=>x.cmd==='furniture_load_flowerpot').data.list,[401],'imported garden ownership remains visible');
   assert.equal((await client.send('item.buy',{shop_id:0})).code,0);
   assert.equal((await client.send('client.load_role')).res.clover_point,90);
   assert.equal((await client.send('album.delete',{id:5})).code,0);
@@ -412,13 +414,13 @@ test('snapshot unlocks imported account, mutations and travel progress, unsuppor
   assert.equal((await client.send('item.set_bag_completed',{completed:true})).code,0);
   await eventAfter(client,start,x=>x.cmd==='notify_new_event'&&x.data.event.evt_type===2);
   assert.equal((await client.send('album.load_new')).pictures.length,1,'active timer settles imported trip');
-  const unsupported=await client.send('pray.compose',{id:8,token:'do-not-log',message:'private-text'});
+  const unsupported=await client.send('qa.not_implemented',{id:8,token:'do-not-log',message:'private-text'});
   assert.equal(unsupported.code,1);assert.equal(unsupported.supported,false);
-  await client.send('pray.compose',{id:8,token:'do-not-log'});
-  await client.send('furniture.load_flowerpot');
+  await client.send('qa.not_implemented',{id:8,token:'do-not-log'});
+  await client.send('qa.load_history');
   const calls=(await get(`unsupported?account=${account}`)).calls;
-  assert.equal(calls.find(x=>x.command==='pray_compose').count,2);
-  assert.equal(calls.find(x=>x.command==='furniture_load_flowerpot').reason,'snapshot_read_only');
+  assert.equal(calls.find(x=>x.command==='qa_not_implemented').count,2);
+  assert.equal(calls.find(x=>x.command==='qa_load_history').reason,'snapshot_read_only');
   assert.ok(!JSON.stringify(calls).includes('do-not-log'));
   const activeSave=await get(`export?account=${account}`);
   assert.equal(activeSave.official.mode,'active');assert.deepEqual(activeSave.official.capture,capture);
@@ -428,7 +430,7 @@ test('snapshot unlocks imported account, mutations and travel progress, unsuppor
   assert.equal((await after.send('album.load_all')).id_list.length,1);
   assert.equal((await after.send('client.load_role')).res.clover_point,100);
   assert.equal((await after.send('item.buy',{shop_id:0})).code,0,'restored original snapshot remains writable');
-  assert.equal((await get(`unsupported?account=${account}`)).calls.find(x=>x.command==='pray_compose').count,2,'diagnostics survive rollback');
+  assert.equal((await get(`unsupported?account=${account}`)).calls.find(x=>x.command==='qa_not_implemented').count,2,'diagnostics survive rollback');
 });
 
 test('HTTP snapshot restore protects state and invalidates connected game clients', async t => {
@@ -518,10 +520,10 @@ test('garden workbench, construction, placement and neighbor rewards use native 
   assert.equal((await get(`export?account=${account}`)).furniture,null,'garden GET must not initialize records');
   const client=await connect(account);
   assert.equal(client.events.find(x=>x.cmd==='furniture_load_furniture').data.bench.length,10);
-  const parcel=await post(account,'mail',{title:'Workshop supplies',clover:10,items:[10201,10301,10101,10001,3000].map(item_id=>({item_id,count:1}))});
+  const parcel=await post(account,'mail',{title:'Workshop supplies',clover:10,items:[10202,10301,10101,10003,3000].map(item_id=>({item_id,count:1}))});
   await client.send('mail.open',{id:parcel.mail.id});
   assert.equal((await client.send('furniture.putin_bench',{pos:1,id:10101})).code,1);
-  assert.equal((await client.send('furniture.putin_bench',{pos:1,id:10201})).code,0);
+  assert.equal((await client.send('furniture.putin_bench',{pos:1,id:10202})).code,0);
   assert.equal((await client.send('furniture.putin_bench',{pos:6,id:10101})).code,0);
   await client.send('client.hello');
   assert.equal(client.events.filter(x=>x.cmd==='furniture_load_furniture').at(-1).data.bench[5],10101);
@@ -540,8 +542,8 @@ test('garden workbench, construction, placement and neighbor rewards use native 
   await client.send('client.hello');
   const placed=await get(`garden?account=${account}`);
   assert.deepEqual(placed.furniture.put_fur,[{type:1,id:1101}]);
-  assert.equal(placed.inventory.find(x=>x.item_id===10201).count,1,'reusable tool remains owned');
-  assert.ok(!placed.inventory.some(x=>x.item_id===10001),'raw material spent');
+  assert.equal(placed.inventory.find(x=>x.item_id===10202).count,1,'reusable tool remains owned');
+  assert.ok(!placed.inventory.some(x=>x.item_id===10003),'raw material spent');
   assert.equal((await client.send('furniture.buy_shop',{shop_id:1})).code,0);
   assert.equal((await client.send('furniture.buy_shop',{shop_id:1})).code,1,'per-visit shop limit');
   await post(account,'visitor-depart',{});

@@ -53,7 +53,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: server
-        image: harbor.k8s.lan/library/travel-frog-server:0.10.0
+        image: harbor.k8s.lan/library/travel-frog-server:0.12.0
         imagePullPolicy: Always
         ports:
         - name: http

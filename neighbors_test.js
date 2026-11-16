@@ -22,7 +22,8 @@ const CATALOG = {
 function fixture(t) {
   const database = new FrogDatabase(':memory:');
   t.after(() => database.close());
-  const service = new NeighborService(database, CATALOG, { durationSeconds: 60, cooldownSeconds: 120 });
+  let randomIndex=0;const rolls=[0.5,0.9,0.1];
+  const service = new NeighborService(database, CATALOG, { durationSeconds: 60, cooldownSeconds: 120, arrivalChance:1, random:()=>rolls[randomIndex++%rolls.length] });
   database.ensureAccount('neighbor-test');
   return { database, service, account: 'neighbor-test' };
 }
@@ -71,7 +72,7 @@ test('served neighbor leaves one reward mail, and mail_open settles it only once
   assert.equal(database.getRole(account).res.clover_point, before.clover_point + 80);
   assert.equal(database.getRole(account).res.ticket, before.ticket + 1);
   assert.equal(service.sync(account, 279).guest.id, -1);
-  assert.equal(service.sync(account, 280).guest.id, 1, 'neighbors rotate after their cooldown');
+  assert.equal(service.sync(account, 280).guest.id, 1, 'injected random chooses the next identity after cooldown');
 });
 
 test('unfed departure grants no reward and late feeding is rejected', t => {
@@ -172,4 +173,23 @@ test('invalid imports and unavailable catalogs do not invent playable neighbors'
   assert.deepEqual(neighborReward(60), { clover_point: 50, ticket: 0 });
   assert.deepEqual(neighborReward(20), { clover_point: 30, ticket: 0 });
   assert.deepEqual(neighborReward(19), { clover_point: 20, ticket: 0 });
+});
+
+test('arrival probability is evaluated once per persisted check interval and identities are sampled',t=>{
+  const {database,account}=fixture(t);let calls=0;
+  const service=new NeighborService(database,CATALOG,{durationSeconds:60,cooldownSeconds:120,arrivalChance:0.1,checkSeconds:30,random:()=>{calls++;return 0.9;}});
+  service.sync(account,100);service.finish(account,160);
+  assert.equal(service.sync(account,280).guest.id,-1);assert.equal(calls,1);
+  assert.equal(service.state(account).next_visit_at,310);
+  service.sync(account,281);service.sync(account,309);assert.equal(calls,1,'polling every second must not reroll the arrival chance');
+  service.random=()=>0.05;const arrived=service.sync(account,310);assert.equal(arrived.guest.id,0,'same identity can revisit instead of a forced 0,1,2 cycle');
+  assert.equal(service.sync(account,311).guest.id,0);assert.equal(service.state(account).expire_time,370,'resync keeps persisted departure time');
+});
+
+test('configured reward ranges remain stable across retries and service recreation',t=>{
+  const {database,account}=fixture(t),options={durationSeconds:60,cooldownSeconds:120,rewardTable:[{feeling:80,clover:[60,100],ticket:[1,3]},{feeling:0,clover:[10,30],ticket:[0,0]}]};
+  const service=new NeighborService(database,CATALOG,options);service.sync(account,100);database.changeInventory(account,3001,1);service.serve(account,0,3001,110);
+  const state=service.state(account),reward=service.reward(account,state);assert.ok(reward.clover_point>=60&&reward.clover_point<=100);assert.ok(reward.ticket>=1&&reward.ticket<=3);
+  assert.deepEqual(new NeighborService(database,CATALOG,options).reward(account,state),reward);
+  const mail=service.finish(account,160).mail;assert.equal(mail.resource.clover_point,reward.clover_point);assert.equal(mail.resource.ticket,reward.ticket);assert.equal(service.finish(account,161).mail,null);
 });

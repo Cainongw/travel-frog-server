@@ -1,6 +1,6 @@
 # 实现范围与后续工作
 
-本文以当前服务端与 `admin-ui/src` 为准。项目版本为 0.10.0，SQLite 游戏 schema 与 JSON 导出格式为 v6，仍接受 v1–v5 导入；管理快照另有带完整性校验的内部格式。它是基于客户端协议实现的本地服务器；客户端能打开某个页面、收到 `{code:0}`，并不证明对应玩法已经实现。
+本文以当前服务端与 `admin-ui/src` 为准。开发版本为 0.12.0；集群部署与原生验收进度见 [复刻路线](replication-roadmap.md)。SQLite 游戏 schema 与 JSON 导出格式为 v6，仍接受 v1–v5 导入；管理快照另有带完整性校验的内部格式。客户端能打开页面或收到成功回包，不能单独证明玩法已完整验证。
 
 APK 配置包含图片、物品、笔记和奖项定义，不能据此恢复玩家的官方账号进度。管理台管理的是当前服务器的 SQLite 数据；将真实存档迁入仍需先取得真实数据，再转换成相应记录。
 
@@ -12,15 +12,15 @@ APK 配置包含图片、物品、笔记和奖项定义，不能据此恢复玩�
 | 角色与设置 | `client.set_name`、`client.set_icon`、`client.set_achieve`、`client.set_pic_show`、`client.set_client` | 保存姓名、图标、称号选择、展示图片与客户端设置。称号的完整自动解锁条件尚未实现。 |
 | 相册与礼品盒 | `album.load*`、`album.save_new`、`album.delete*`、`album.recover`、`travel.*gift*` | 分页、按 ID 读图层、新图片保存、回收站恢复、图片与特产在礼品盒间移动。后台可下发新明信片。 |
 | 邮件 | `mail.load`、`mail.load_mails`、`mail.read`、`mail.open` | 保存阅读和领取状态，事务发放草、券、道具；同一封信不重复领取。含明信片的邮件打开后重新推送全部待收明信片列表。 |
-| 背包与商店 | `item.load_items`、`item.putin_*`、`item.takeout_*`、`item.buy`、`item.load_shop_info` | 库存和槽位持久化、64 条商店规则的价格/前置购买/次数检查；旅行期间禁止修改正在使用的背包。并未完整复原全部道具分类、堆叠上限和商店活动规则。 |
+| 背包与商店 | `item.load_items`、`item.putin_*`、`item.takeout_*`、`item.buy`、`item.load_shop_info` | 四格背包、八格桌面按原生类型校验，错误溢出返仓；当前配置商店、前置/持有量/次数检查，旅行期间锁定背包。相册扩容保留官方已有收藏基准；确切初始容量仍为近似。 |
 | 三叶草 | `clover.load_clovers`、`clover.harvest`、`clover.harvest_resend` | 20 个种植点、默认两小时再生、重复收获检查；不是完整季节/施肥/概率模型。 |
-| 最小旅行循环 | `item.set_bag_completed`、`client.confirm_event` 和相关推送 | 背包食物就绪即出发、定时归来、离线后补结算，生成图片/笔记/特产，并保存未确认事件。默认 60 秒，轮换五条路线；未恢复真实旅行路线算法。 |
-| 串门访客 | `visit.load`、`visit.set_carpet`、`visit.set_expire_time`、`visit.open` | 访客停留、离开后礼物领取、初次省份花朵收集、复访券奖励；循环七个省份。领取和计时状态跨重启保存。此功能不是乌龟/猫头鹰/松鼠的 `guest.*` 邻居喂食玩法。 |
+| 旅行循环 | `item.set_bag_completed`、`client.confirm_event` 和相关推送 | 就绪后在家等待、随机目的地/同行、食品/方向/工具/季节倾向、按 Item.spend 消耗/返还、桌面补给、离线补结算。概率与计时为明示本地策略，旅行开始时保存计划，重启不重抽。旧五路线仅作兼容测试路径。 |
+| 串门访客 | `visit.load`、`visit.set_carpet`、`visit.set_expire_time`、`visit.open` | 当前配置省份与回礼范围、初次花朵收集、复访奖励、离场后领取。顺序/新省份倾向为本地近似；领取和计时跨重启。 |
 | 原生抽奖 | `item.gacha`、`item.redeem_prize` | 扣 5 券、六色抽奖、选择同色奖项、白球返券、待兑奖状态跨重启恢复。配置来自 APK，免费抽奖必须有服务器已记账的奖励次数。详见 [gameplay-protocol.md](gameplay-protocol.md)。 |
-| 家具 | `furniture.load_furniture`、`furniture.putin_bench`、`furniture.takeout_bench`、`furniture.buy_shop`、`furniture.replace_fur` | 十槽工作台、材料消费、可复用工具和图纸、自动定时制作、离线补结算、拥有和摆放、商店价格与购买限制。218 个可制作家具采用本地近似配方，非官方完整算法；不倒翁等独立物件未实现。 |
-| 邻居 | `guest.load`、`guest.confirm`、`guest.serve`、`guest.set_expire_time`、`guest.finish` | 三种邻居轮换、按 APK 特产喜好喂食、离场回礼邮件、一次性消费及领取、重启持久化；到访和奖励数额使用明示本地规则。 |
+| 家具 | `furniture.*` | 十槽工作台、实际材料消费、可复用工具/图纸、353 个配置可制造输出、本地分类配方与耗时；特殊物件共享工作台锁。405 条家具定义不等于全部可制造，默认和活动专属分开处理。 |
+| 邻居 | `guest.load`、`guest.confirm`、`guest.serve`、`guest.set_expire_time`、`guest.finish` | 首次引导后随机邻居、按配置喜好喂食、离场回礼邮件；持久化概率检查，回礼范围每访稳定，不因重启重抽。冷却和奖励数额仍为本地规则。 |
 | 笔记、故事和图鉴存储 | `travel.load_note`、`travel.read_note`、`story.load`、`item.load_handbook`、`misc.moment_*`、`encyclopedia.*` | 支持现有记录读取、部分标记/解锁，以及存档导入导出。故事赠礼、故事反馈和完整自然解锁链尚未实现。 |
-| 天气 | `weather.load` 与管理接口 | 季节、时段、天气持久化；后台修改后通知重新进入游戏，加载对应场景资源。并非自动气候模拟。 |
+| 天气 | `weather.load` 与管理接口 | 上海时区自动季节/昼夜与每三小时稳定天气，睡姿/生活动作轮换；后台手动天气会保留为覆盖。概率与行为调度为本地策略。 |
 
 ## 本轮修正的客户端语义
 
@@ -78,15 +78,18 @@ HTTP 管理支持 OIDC 会话或开发用 Bearer 密钥。游戏 WebSocket 默�
 
 这些模板是供离线玩法使用的近似排布，不能称为已经恢复官方服务器的完整构图算法。当前没有覆盖全部图片配置的随机背景选择、坐标规则、道具姿态、季节变体或稀有图片概率。管理台可以发送已知合法图层记录，但并不意味着所有 `pic_id` 都已有自动生成模板。原始 PNG 是资源素材，而不是某个玩家拥有那张明信片的证明。
 
-## 尚未实现或只返回空数据
+## 本轮新增模块与剩余验证
 
-下列功能不能标为完成：
+下列模块已经落地并通过隔离回归，但逐项原生验收尚未全部完成，不能因此将整个路线图勾完：
 
-- `story.send_gift`、`story.feedback_gift` 等故事发展、赠礼与反馈循环；当前 `story.load` 只读取已有故事。
-- 花盆、种植、堆肥、不倒翁和其他庭院物件的完整制作/收益循环。
-- `pray.*` 手作、烹饪任务、绘画聚会、博物馆探索、许愿池、答题、节日活动与历史活动状态机。
-- 所有称号/图鉴/明信片的官方解锁条件，食品/护身符/工具的实际旅行效果。
-- 官方账号迁移与官方历史存档自动导出。广告、支付、社交平台、官方推送也未接入。
+- `creative.js`：绘画聚会、手作/印章/木片合成、不倒翁、花盆、堆肥、挂兜。[创作说明](creative-protocols.md)
+- `activities.js` / `cards.js`：动态照片、扭蛋、许愿池、两类贺卡、蛋糕问答。[活动](activity-protocols.md)与[贺卡蛋糕](card-cake-protocols.md)
+- `exploration.js`：博物馆路线、票/收藏/图片与周末挑选。`koto` 只有协议声明，入口仍缺证据。[探索说明](exploration-protocols.md)
+- `life.js` / `daily.js`：烹饪任务与月度食品、故事赠礼反馈、日历与清单、新呱奖励、年报、点击特效及美好瞬间。[生活](life-protocols.md)与[日常](daily-protocols.md)
+- `progression.js`：103 条配置称号条件、双百科、限期称号道具与过期；长周期以隔离虚拟时间测试。[成长说明](progression.md)
+- `postcard_generator.js` / `travel_policy.js`：配置构图与旅行倾向。图层合法不等于所有近似构图都已视觉验收。[明信片](postcard-generation.md)与[旅行](travel-policy.md)
+
+所有新进度位于账号级 `game_module_state`，参与 JSON 导入导出与原始行快照；旧快照没有模块状态时恢复为空，旧捕获仍保留。已知模块导入执行结构/数值校验，拒绝损坏数据；定时推进按模块/账号隔离异常，不应由一份损坏进度终止整个服务。分享/广告/充值与官方 SDK 服务仍不接入；有本地替代的任务明确写在对应说明中。
 
 `server.js` 的默认分支对未实现协议记录日志并返回 `{code:1,supported:false}`，同时发送有限频率的客户端提示。有原始记录的未实现读取协议会返回记录并记为 `snapshot_read_only`。初始化推送中的空数据和原始活动记录不代表相应玩法已经实现。
 

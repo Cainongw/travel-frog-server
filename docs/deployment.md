@@ -2,6 +2,10 @@
 
 ## 服务
 
+本轮全功能开发保留快照 #3 和完整库备份，第一批镜像 0.11.0 已在集群运行；整合后的 0.12.0 仍需完成整体验证后逐步升级，进度以 [replication-roadmap.md](replication-roadmap.md) 为准。
+
+如 Docker Desktop 引擎不可用且运行时依赖完全未变，可用 `deploy/build_overlay.py` 对已验证的 Docker-save 基础镜像追加 `/app` 源码层，生成标准 OCI 包，再通过 master 的 `ctr images import/push` 发布。脚本拒绝超出 JS/package 清单的路径并固定检查运行依赖，不读取 registry 凭据。正常环境仍优先按 Dockerfile 构建；修改依赖时必须重建运行时镜像。
+
 `Dockerfile` 提供两个构建目标：`server` 为 Node.js 24 游戏/API 服务，`management` 为独立 Nginx/Svelte 管理端。两个镜像均不包含游戏素材、数据库、管理密钥或 APK。`deploy/k8s.yaml` 在 `travel-frog` 命名空间创建两个 Deployment 和 Service；只有游戏服务挂载 Longhorn PVC，不创建 Ingress。SQLite 使用单副本和 Recreate 更新；数据库与素材都放在 `/data`，需另外备份持久卷。
 
 ```powershell

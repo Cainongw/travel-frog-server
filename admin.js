@@ -46,7 +46,8 @@ class AdminService {
       if (!Array.isArray(x?.layer) || x.layer.length !== 3) throw Error('Each layer must be [resource_id, x, y]');
       const [id, px, py] = x.layer;
       if (!this.catalog.resources[id]) throw Error('Unknown picture resource');
-      integer(id, 'resource_id'); integer(px, 'x', -2000, 2000); integer(py, 'y', -2000, 2000);
+      integer(id, 'resource_id');
+      if(!Number.isFinite(px)||!Number.isFinite(py)||Math.abs(px)>10000||Math.abs(py)>10000)throw Error('Invalid picture coordinates');
       return { layer: [id, px, py] };
     });
     return { pic_id: picture.pic_id, layers, for_ads: false, visit: false };
@@ -100,6 +101,7 @@ class AdminService {
         case 'furniture-finish': {
           const service=this.services.furniture;
           if (!service) throw Error('Furniture service unavailable');
+          if(['furniture-put','furniture-take','furniture-advance'].includes(action)&&this.services.creative?.isBenchLocked(account))throw Error('特殊物件正在制作，工作台已锁定');
           result=action==='furniture-put'?service.put(account,body.pos,body.id)
             :action==='furniture-take'?service.take(account,body.pos)
             :action==='furniture-buy'?service.buy(account,body.shop_id)

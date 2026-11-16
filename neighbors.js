@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('node:crypto');
+
 const accountKey = value => String(value || 'guest').trim().slice(0, 128) || 'guest';
 const clock = () => Math.floor(Date.now() / 1000);
 const DEFAULT_NEIGHBOR = Object.freeze({
@@ -79,6 +81,21 @@ class NeighborService {
     migrateNeighbors(database);
     this.duration = number(options.durationSeconds ?? 1800, 'duration', 1, 86400);
     this.cooldown = number(options.cooldownSeconds ?? 21600, 'cooldown', 1, 604800);
+    this.random = options.random || Math.random;
+    this.arrivalChance = options.arrivalChance ?? 0.1;
+    if (typeof this.arrivalChance !== 'number' || !Number.isFinite(this.arrivalChance) || this.arrivalChance < 0 || this.arrivalChance > 1) throw Error('Invalid neighbor arrival probability');
+    this.checkSeconds = number(options.checkSeconds ?? 1800, 'arrival check interval', 1, 604800);
+    this.firstNeighborId = options.firstNeighborId === null ? null : number(options.firstNeighborId ?? 0, 'first identity', 0, 2);
+    this.rewardTable = options.rewardTable || [
+      { feeling:80, clover:[80,80], ticket:[1,1] }, { feeling:60, clover:[50,50], ticket:[0,0] },
+      { feeling:20, clover:[30,30], ticket:[0,0] }, { feeling:0, clover:[20,20], ticket:[0,0] },
+    ];
+    if(!Array.isArray(this.rewardTable)||!this.rewardTable.length||!this.rewardTable.some(x=>x.feeling===0))throw Error('Invalid neighbor reward table');
+    this.rewardTable=this.rewardTable.map(row=>{
+      number(row.feeling,'reward feeling',0,100);
+      for(const key of ['clover','ticket'])if(!Array.isArray(row[key])||row[key].length!==2||row[key].some(x=>!Number.isSafeInteger(x)||x<0)||row[key][1]<row[key][0])throw Error('Invalid neighbor reward range');
+      return {feeling:row.feeling,clover:[...row.clover],ticket:[...row.ticket]};
+    }).sort((a,b)=>b.feeling-a.feeling);
     this.characters = new Map((catalog.neighbors || []).map(x => [x.id, x]));
     this.items = new Map((catalog.items || []).map(x => [x.id, x]));
     this.specialtyIndex = new Map((catalog.specialties || []).map((x, index) => [x.itemId, index]));
@@ -86,6 +103,15 @@ class NeighborService {
   }
 
   state(account) { return getNeighborState(this.database, account); }
+  roll() { const value=this.random();if(typeof value!=='number'||!Number.isFinite(value)||value<0||value>=1)throw Error('Invalid neighbor random source');return value; }
+  reward(account,state){
+    const row=this.rewardTable.find(x=>state.feeling>=x.feeling);
+    // Stable per-visit variation means retries and process restarts cannot
+    // reroll an already-earned reward before the departure transaction commits.
+    const digest=crypto.createHash('sha256').update(`${account}:${state.visit_count}:${state.food_item}:${state.expire_time}:${state.feeling}`).digest();
+    const choose=(range,index)=>range[0]+digest.readUInt32BE(index)%(range[1]-range[0]+1);
+    return {clover_point:choose(row.clover,0),ticket:choose(row.ticket,4)};
+  }
   result(account, fields = {}) {
     return { ok: true, guest: guestProtocol(this.state(account)), mail: null, changed: false, ...fields };
   }
@@ -103,7 +129,7 @@ class NeighborService {
     if (state.id < 0 || state.expire_time <= 0 || state.expire_time > now) return null;
     let mail = null;
     if (state.served) {
-      const reward = neighborReward(state.feeling);
+      const reward = this.reward(account,state);
       const resource = { ...reward, reward_gacha: 0, ads_id: '', share_id: '' };
       const id = Math.max(now * 1000, Number(database.db.prepare('SELECT COALESCE(MAX(id),0)+1 AS id FROM mails WHERE account=?').get(account).id));
       const name = this.characters.get(state.id)?.name || ['困困', '胖胖', '跳跳'][state.id];
@@ -118,7 +144,8 @@ class NeighborService {
 
   arrive(account, now) {
     const state = this.state(account);
-    importNeighborState(this.database, account, { ...DEFAULT_NEIGHBOR, id: state.visit_count % 3,
+    const id=state.visit_count===0&&this.firstNeighborId!==null?this.firstNeighborId:Math.floor(this.roll()*3);
+    importNeighborState(this.database, account, { ...DEFAULT_NEIGHBOR, id,
       expire_time: now + this.duration, visit_count: state.visit_count + 1 });
   }
 
@@ -130,7 +157,9 @@ class NeighborService {
       let changed = Boolean(finished);
       const state = this.state(account);
       if (this.available && state.id < 0 && state.next_visit_at <= now && !this.visitorActive(account, now)) {
-        this.arrive(account, now); changed = true;
+        if(state.visit_count>0&&this.arrivalChance<1&&this.roll()>=this.arrivalChance){
+          importNeighborState(database,account,{...state,next_visit_at:now+this.checkSeconds});
+        }else{this.arrive(account, now);changed=true;}
       }
       return this.result(account, { mail: finished?.mail || null, changed });
     });

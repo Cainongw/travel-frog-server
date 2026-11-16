@@ -6,6 +6,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { migrateGameplay, getGachaState, importGachaState, grantGachaCredits } = require('./gameplay');
 const { migrateFurniture, exportFurnitureState, importFurnitureState } = require('./furniture');
 const { migrateNeighbors, getNeighborState, importNeighborState } = require('./neighbors');
+const { ModuleState } = require('./module_state');
 
 const DEFAULT_SETTINGS = {
   guideStep: 'Complete',
@@ -66,6 +67,7 @@ class FrogDatabase {
     this.db = new DatabaseSync(filename);
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;');
     this.migrate();
+    this.modules=new ModuleState(this);
   }
 
   migrate() {
@@ -461,6 +463,25 @@ class FrogDatabase {
     return row ? Number(row.count) : 0;
   }
 
+  normalizeEquipment(value){
+    if(!this.economy||this.isOfficialReadOnly(value))return;
+    const account=normalizeAccount(value),row=this.ensureAccount(account);
+    if(this.getTravelState(account))return;
+    this.transaction(()=>{for(const kind of ['bag','desk']){
+      const previous=parseJson(row[kind+'_json'],[]),normalized=this.economy.normalizedSlots(kind,previous);
+      for(const item of normalized.overflow)if(Number.isSafeInteger(item.item_id)&&item.item_id>=0)this.changeInventory(account,item.item_id,1);
+      if(JSON.stringify(previous)!==JSON.stringify(normalized.slots))this.updateAccount(account,{[kind+'_json']:JSON.stringify(normalized.slots)});
+    }});
+  }
+
+  albumCapacity(value){
+    if(!this.economy)return Infinity;
+    const account=normalizeAccount(value),state=this.modules.get(account,'economy',{}),current=this.countPostcards(account,'album');
+    const expansions=this.getInventoryCount(account,9000);
+    if(state.album_base===undefined){const raw=this.getOfficialArchive(account);const original=raw?.protocols?.client_load_role?.misc?.picture_cnt||0;const oldExpansion=(raw?.protocols?.item_load_items?.house||[]).find?.(x=>x.item_id===9000)?.count||0;state.album_base=this.economy.inferAlbumBase(original,oldExpansion);state.preserved_count=Math.max(original,current);this.modules.set(account,'economy',state);}
+    return this.economy.albumCapacity(expansions,{baseline:state.album_base,preservedCount:state.preserved_count||0});
+  }
+
   changeInventory(value, itemId, delta) {
     const account = normalizeAccount(value);
     this.ensureAccount(account);
@@ -476,6 +497,7 @@ class FrogDatabase {
     const account = normalizeAccount(value);
     this.ensureAccount(account);
     if (kind === 'bag' && this.getTravelState(account)) return { ok: false, conflict: true, changes: [] };
+    if(this.economy&&!this.economy.allowsSlot(kind,Number(position),Number(itemId)))return {ok:false,conflict:true,changes:[]};
     const column = kind === 'bag' ? 'bag_json' : kind === 'desk' ? 'desk_json' : null;
     if (!column) throw new Error(`invalid equipment kind: ${kind}`);
     const index = Number(position) - 1;
@@ -494,6 +516,7 @@ class FrogDatabase {
       slots[index] = nextItem;
       this.db.prepare(`UPDATE accounts SET ${column} = ?, updated_at = ? WHERE account = ?`)
         .run(JSON.stringify(slots), Math.floor(Date.now() / 1000), account);
+      if(this.economy&&kind==='bag'){this.updateAccount(account,{bag_completed:0});const plan=this.modules.get(account,'travel-plan',{});delete plan.depart_at;this.modules.set(account,'travel-plan',plan);}
       return { ok: true, conflict: false, changes };
     });
   }
@@ -516,6 +539,7 @@ class FrogDatabase {
       slots[index] = -1;
       this.db.prepare(`UPDATE accounts SET ${column} = ?, updated_at = ? WHERE account = ?`)
         .run(JSON.stringify(slots), Math.floor(Date.now() / 1000), account);
+      if(this.economy&&kind==='bag'){this.updateAccount(account,{bag_completed:0});const plan=this.modules.get(account,'travel-plan',{});delete plan.depart_at;this.modules.set(account,'travel-plan',plan);}
       return { ok: true, conflict: false, changes };
     });
   }
@@ -636,20 +660,26 @@ class FrogDatabase {
       const accountRow = this.db.prepare('SELECT * FROM accounts WHERE account = ?').get(account);
       const bag = parseJson(accountRow.bag_json, [-1, -1, -1, -1, -1]);
       const itemChanges = [];
-      for (let i = 1; i < bag.length; i++) {
-        const itemId = Number(bag[i]);
-        if (itemId >= 0) itemChanges.push({ item_id: itemId, count: this.changeInventory(account, itemId, 1) });
+      const savedPlan=this.modules.get(account,'travel-plan',{});
+      const plan=savedPlan.trip_number===Number(trip.trip_number)?savedPlan:null;
+      const returns=plan?.spending.returned||bag.slice(1).filter(x=>x>=0).map(item_id=>({item_id,count:1}));
+      const desk=parseJson(accountRow.desk_json,Array(8).fill(-1));let deskChanged=false;
+      for(const item of returns){const loan=plan?.desk_loans?.find(x=>x.bag===item.slot&&x.item_id===item.item_id);
+        if(loan&&desk[loan.desk-1]===-1){desk[loan.desk-1]=item.item_id;deskChanged=true;}
+        else itemChanges.push({item_id:item.item_id,count:this.changeInventory(account,item.item_id,item.count)});
       }
+      if(deskChanged)this.updateAccount(account,{desk_json:JSON.stringify(desk)});
       const postcardId = this.nextPostcardId(account);
-      const specialtyId = Number(route.specialtyId);
-      const postcard = makePostcard(route, companionId, postcardId);
+      const specialty=plan?plan.rewards.specialty:{item_id:Number(route.specialtyId),count:1};
+      const specialtyId = specialty?.item_id??-1;
+      const postcard = makePostcard(route, companionId, postcardId,{account,bag,season:accountRow.season});
       this.addPostcard(account, postcard, 'new', now);
-      const note = this.db.prepare(`
+      const noteId=plan?plan.rewards.noteId:Number(route.noteId);
+      const note = noteId===null?{changes:0}:this.db.prepare(`
         INSERT OR IGNORE INTO travel_notes(account,note_id,is_read,timestamp) VALUES (?,?,0,?)
-      `).run(account, Number(route.noteId), now);
-      this.db.prepare('INSERT OR IGNORE INTO handbook(account,kind,item_id) VALUES (?,?,?)')
-        .run(account, 'specialty', specialtyId);
-      itemChanges.push({ item_id: specialtyId, count: this.changeInventory(account, specialtyId, 1) });
+      `).run(account, noteId, now);
+      if(specialty){this.db.prepare('INSERT OR IGNORE INTO handbook(account,kind,item_id) VALUES (?,?,?)').run(account,'specialty',specialtyId);itemChanges.push({item_id:specialtyId,count:this.changeInventory(account,specialtyId,specialty.count)});}
+      if(plan?.rewards.collectionId!==null&&plan?.rewards.collectionId!==undefined)this.db.prepare('INSERT OR IGNORE INTO handbook(account,kind,item_id) VALUES (?,?,?)').run(account,'collection',plan.rewards.collectionId);
       const mailId = now * 1000 + 500 + (Number(trip.trip_number) % 500);
       this.db.prepare(`
         INSERT OR REPLACE INTO mails(account,id,type,sender,timestamp,title,message,resource_json,items_json,pictures_json)
@@ -657,14 +687,15 @@ class FrogDatabase {
       `).run(account, mailId, now, `${route.destination}的明信片`, `${route.destination}旅行归来，带回了特产。`,
         '{}', JSON.stringify([]), JSON.stringify([postcardId]));
       this.db.prepare(`UPDATE accounts SET frog_status=0,frog_motion=0,bag_json=?,bag_completed=0,updated_at=? WHERE account=?`)
-        .run(JSON.stringify([-1, -1, -1, -1, -1]), now, account);
+        .run(JSON.stringify(plan?.spending.nextBag||Array(bag.length).fill(-1)), now, account);
       this.db.prepare('DELETE FROM travel_trips WHERE account = ?').run(account);
+      if(plan)this.modules.set(account,'travel-plan',{home_at:now+plan.homeWaitSeconds});
       const backHomeId = now * 1000 + 700 + (Number(trip.trip_number) % 300);
       this.db.prepare(`
         INSERT INTO travel_events(account,event_id,evt_type,evt_id,evt_value_json,evt_string_json,evt_pic_json,created_at)
         VALUES (?,?,?,?,?,?,?,?)
       `).run(account, backHomeId, 2, route.id, JSON.stringify([0, 0, 0, 0, -1, specialtyId]), JSON.stringify([route.destination]), '[]', now);
-      return { route, companionId, postcard, itemChanges, noteAdded: note.changes > 0, mailId, eventIds: [backHomeId] };
+      return { route, companionId, postcard, itemChanges, noteAdded: note.changes > 0, mailId, eventIds: [backHomeId],durationSeconds:now-Number(trip.started_at) };
     });
   }
 
@@ -686,6 +717,10 @@ class FrogDatabase {
   }
 
   createVisitor(account, now, durationSeconds) {
+    if(this.economy?.provinces.length){
+      const visitor=this.economy.provinceVisitor({now,durationSeconds,acquired:this.getVisitorAcquire(account)});
+      this.db.prepare('UPDATE visitor_state SET visitor_json=?,updated_at=?,visit_count=visit_count+1 WHERE account=?').run(JSON.stringify(visitor),now,account);return visitor;
+    }
     const acquired = this.getVisitorAcquire(account);
     const provinces = ['北京', '上海', '广东', '四川', '浙江', '云南', '海外'];
     const sequence = this.db.prepare('SELECT visit_count FROM visitor_state WHERE account = ?').get(account).visit_count;
@@ -791,6 +826,7 @@ class FrogDatabase {
       const purchase = this.db.prepare('SELECT count FROM shop_purchases WHERE account = ? AND shop_id = ?')
         .get(account, shopItem.id);
       const purchased = purchase ? Number(purchase.count) : 0;
+      if(this.economy){const state=this.getItemState(account),check=this.economy.checkPurchase(shopItem.id,{clover:role.clover,inventory:state.house,bag:state.bag,desk:state.desk,purchases:this.getShopPurchases(account)});if(!check.ok)return check;if(shopItem.itemId===9000)this.albumCapacity(account);}
       if (shopItem.limit > 0 && purchased >= shopItem.limit) return { ok: false, reason: 'purchase limit reached' };
       if (shopItem.requires != null) {
         const prerequisite = this.db.prepare('SELECT count FROM shop_purchases WHERE account = ? AND shop_id = ?')
@@ -852,6 +888,7 @@ class FrogDatabase {
   }
 
   setWeather(value, weather) {
+    if(this.economy){const state=this.modules.get(value,'world',{});state.weather_manual=true;this.modules.set(value,'world',state);}
     this.updateAccount(value, {
       season: Math.max(1, Math.min(4, Number(weather.season || 4))),
       hours_type: Math.max(1, Math.min(4, Number(weather.hours_type || 1))),
@@ -955,6 +992,7 @@ class FrogDatabase {
 
   movePostcard(value, id, from, to) {
     const account = normalizeAccount(value);
+    if(to==='album'&&from!=='album'&&this.countPostcards(account,'album')>=this.albumCapacity(account))return false;
     const result = this.db.prepare(
       'UPDATE postcards SET location = ?, updated_at = ? WHERE account = ? AND id = ? AND location = ?',
     ).run(to, Math.floor(Date.now() / 1000), account, Number(id), from);
@@ -1125,6 +1163,7 @@ class FrogDatabase {
       },
       furniture: exportFurnitureState(this, account),
       neighbors: getNeighborState(this, account),
+      modules:this.modules.export(account),
       official: this.getOfficialArchive(account),
     };
   }
@@ -1314,6 +1353,7 @@ class FrogDatabase {
       importGachaState(this, account, snapshot.items?.gacha);
       importFurnitureState(this, account, snapshot.furniture);
       importNeighborState(this, account, snapshot.neighbors);
+      this.modules.import(account,snapshot.modules);
       if(snapshot.official){
         if(!['preserved','active'].includes(snapshot.official.mode)||!snapshot.official.protocols)throw Error('Invalid official archive');
         this.db.prepare('INSERT OR REPLACE INTO official_archives(account,data_json) VALUES (?,?)').run(account,JSON.stringify(snapshot.official));
